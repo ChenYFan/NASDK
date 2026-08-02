@@ -1,13 +1,3 @@
-<style>
-.hooks { border-collapse: collapse; width: 100%; font-size: 14px; }
-.hooks th { background: #2d2d2d; color: #e0e0e0; padding: 6px 10px; text-align: left; }
-.hooks td { padding: 5px 10px; border-bottom: 1px solid #444; vertical-align: top; }
-.hooks .bf { color: #f0a060; font-weight: bold; }
-.hooks .af { color: #60b0f0; font-weight: bold; }
-.hooks .st { color: #c0c0c0; background: #1e1e1e; text-align: center; width: 80px; }
-</style>
-
-
 [$] NACEB是新的抽象层。
 [$] 注意从NyirusuProject第二次重构开始，使用TypeScript开始编写Share库
 
@@ -35,23 +25,25 @@ NACEB在生成时注册PipelineHandler与TaskHandler列表（也可通过NACEB a
 
 请注意，以下专有名词为了避免歧义，均不得自定义缩写。
 
-- NACEB，Nyirusu Application Control Event Bus，缩写必须全部大写，不能写成NAceb、naceb等。
-- Event，指外部传入的“事件”。它的接口名字叫做EventInterface，构建出来的叫做EventInstance。
-- Pipeline，指事件处理的流水线。外部注册的处理逻辑对象叫做PipelineHandler，它是无状态的，`next()` 的 `this` 是 PipelineInstance 本身。NACEB 内部构建的运行时载体叫做 PipelineInstance，持有流水线的执行状态（当前步骤、lastResult 等）。
-- Task，指任务本身。外部注册的执行逻辑对象叫做 TaskHandler，它是无状态的，`execute()` 的 `this` 是 TaskInstance 本身。NACEB 内部构建的运行时载体叫做 TaskInstance，持有任务的执行状态。
-- Layer/三层Layer，NACEB通过Event、Pipeline和Task三层Layer控制和推进内容。需要注意的是，这三个名字并不在 NACEB 内部直接定义，我们在外部说明的时候可以把整套内容称为 Pipeline 流水线、Task 任务和 Event 事件。但在 NACEB 内部，必须使用准确的后缀以区分职责：Event 用 Interface/Instance，Pipeline 和 Task 用 Handler/Instance。Controller也是同理，并且要强调是FSMController。
-- Handler，外部控制器。Handler是外部导入的，尤其特指TaskHandler和PipelineHandler，是NACEB真正要处理的逻辑导入口。NACEB内部的TaskInstance和PipelineInstance会绑定唯一的Handler，**并将.next()和.execute()**内部的this指向Instance自己。这会提供给Handler一个能力：Handler里的具体逻辑可以直接用this读取到Instance的逻辑或者进行修改。
-- Interface，接口。本项目唯一的接口是EventInterface，用于外部pushEvent时提供唯一的形状校准。EventInstance是EventInterface的唯一实现。
-- Instance，实例。实例不是一个模糊的类或者形状，它是被确定的，拥有自己的id和状态。Handler和Interface的状态都应该存储在Instance上，前者通过this绑定，后者是实现。Instance都被Controller保存在不同的Queue中，生命周期完全由Controller控制。
-- Controller控制器。Controller用于控制Instance的生命周期，通过注入NACEB和NACEB内部函数引用Ref来实现对其他Controller和handler的访问。NACEB内部的Controller都是FSMController，也同时掌管Instance的状态转移。
-- tick：刻。翻译成拍或者节拍都不太合适。可能部分遗留文档会翻译成拍。NACEB内部只有Controller是遵循刻的，其中EventController是严格遵循刻。刻的作用是激活每个Controller内部的刻激活器，提醒控制器向前进一步。NACEB的大部分状态更新不是依赖回调或者事件通知的（pause/resume除外），是由刻统一推进。
-- alertTick：刻发生器。默认刻发生器间隔50ms激活一次。如果在一个刻之内，任意一个Controller发生了状态迁移，则这一刻结束后立刻发起下一刻。同态迁移同样被视为有效的状态迁移。刻发生器最大的作用不是强迫向前推进，更多的作用是“提醒”可以往前进一步。换句话说，如果一个tick没有发生状态更新，或者EventQueue中不存在（除了【done、failure或idle】的之外）的事件，发生器会停止。
-- Controller.nextTick：刻激活器。隶属于Controller的tick事件入口。tickAlert本质上就是按照Task->Pipeline->Event从下往上挨个激活本函数。理论上来说刻的作用是提醒Controller往前推一步。Task和Pipeline会把自己队列里所有的状态一起更新掉，Event则在每变更一次状态就会退出，等待下一个刻激活。具体的激活内容参见[^事件与同步]节。
-- hook，钩子。NACEB的钩子主要特指THook，即状态转移钩子，能够在Event/Pipeline/Task发生状态转移时激活钩子回调。钩子默认没有payload，但是绑定this到对应的Instance上。钩子是唯一能够控制时序、介入修改的入口，通常before钩子用于预读取/篡改输入、阻止状态转移，after钩子可以挂上其他钩子、读取输出。
-- eventBus，事件总线。需要严格注意，这里的EventBus不是NACEB三层Layer中的Event，而是NASDK通用的事件总线与监听器。详情可见观测-EventBus。主要包含T事件、运行中事件和错误事件。
-- T事件，特指Transform状态转移事件。和hook一一对齐，本质上是THook中的[before/after]+T+[state]对应钩子默认事件之一的emit。同样回调函数内的this被绑定到对应Instance，但是这里的this是只读的，不可修改。
-- Veto，否决机制。特指THook中的before钩子，能够在其中抛出错误以阻止状态转移。
 
+- NACEB，Nyirusu Application Control Event Bus，缩写必须全部大写，不能写成NAceb、naceb等。
+- Layer，层，包含完整的Controller、Instance、Handler、Interface为一层。NACEB有三层Layer，分别是Event事件层、Pipeline流水线层和Task任务层。
+- Event，特指外部传入的“事件”，注意不要和下面的EventBus内部事件总线混淆。
+- Pipeline，特指事件处理的流水线。
+- Task，特指任务本身。
+- FSM，有限状态机，特指NACEB内部的状态机实现。
+- Controller，控制器，一般是FSMController的简写，负责Instance的生命周期管理。
+- Instance，特指NACEB内部的运行时载体，持有状态和生命周期。
+- Handler，特指外部注册的处理逻辑对象，包含PipelineHandler和TaskHandler。
+- Interface，特指NACEB内部的接口定义，包含EventInterface。
+- tick，刻，特指NACEB内部的统一推进机制。请注意，不要翻译为拍或者节拍。
+- alertTick，刻发生器，特指NACEB内部的刻激活机制。
+- ensureClock，确保刻发生器以最小间隔运行的定时器。
+- Controller.nextTick，隶属于Controller内部的激活器，当外部（通常是alertTick）触发时，会激活该函数。
+- Hook，钩子，表示NACEB发生事件时对外激活的阻塞性回调。目前NACEB的Hook主要指THook（Transform Hook），即事件转义钩子。
+- EventBus，事件总线，特指NACEB.eventBus，用于发布和监听事件。其中EventBusObs（即NACEB.eventBusObs）是对NACEB.eventBus.obs的观察者封装。
+- TEvent，特指Transform状态转移事件，通过EventBus向外发送。由NACEB内部的THookHandler发出，表示Instance状态发生了转移。
+- Veto，否决机制。通过在NACEB THook中的before钩子抛出，能够阻止这一刻下Instance状态的转移。
 
 
 ## NACEB 构成
@@ -93,52 +85,145 @@ Handler必须是无状态的。Handler的this应该直接绑定到Instance上。
 
 Controller持有InstanceQueue，完成Instance的生命周期轮转。Controller不持有Handlers。如果需要访问，同样走`this.naceb`从顶层绕路。
 
+```ts
+class Naceb {
+  constructor(opts: {
+    pipelineHandlers: PipelineHandler[]          
+    taskHandlers:     TaskHandler[]
+    eventAlias?:      EventAlias[] 
+  })
+  pipelineHandlers: {
+    register(h: PipelineHandler): void
+    list(): PipelineHandler[]
+    remove(name: string): void
+    get(name: string): PipelineHandler | undefined
+  }
+
+  taskHandlers: {
+    register(h: TaskHandler): void     // $ 前缀保留，注册会抛错
+    list(): TaskHandler[]
+    remove(name: string): void
+    get(name: string): TaskHandler | undefined
+  }
+  eventAlias: {
+    register(alias: EventAlias): void
+    list(): EventAlias[]
+    remove(eventName: string): void
+    get(eventName: string): EventAlias | undefined
+  }
+  pushEvent(input: EventInput, opts?: PushOpts): string   // 返回自动生成的主 id
+  getEvent(id: string): EventInstance | null  
+  listEvent(): EventInstance[]
+  consumeEvent(id: string): unknown            
+  readonly eventBus: EventBus     
+  get eventBusObs(): ReadonlyBus            
+  on<K extends keyof NacebHooks>(hook: K, fn: NacebHooks[K]): void
+}
+```
 
 
-## 实例状态流转
+## Layer、Controller与Instance
 
-需要注意的是，这里指的是Instance实例的状态流转。
+NACEB有三层Layer，分别是Event、Pipeline与Task。
 
-NACEB 内置三套正交的状态机，Event、Task、Pipeline 各一套。
+Event是外部“事件”的入口，用于告知NACEB内部“发生了什么事”。Event一般会指定一个Pipeline用于处理，或者在EventAlias中指定对应事件名的默认Pipeline。
 
-状态转移全部由 NACEB 内部控制，外部只能通过 hook 观察/介入、或通过 Event 层的受控口间接触发。
+Pipeline是流水线，从这一层开始，NACEB内部才开始真正的“处理”事件。Pipeline是一个机械前进器，它的唯一职责就是根据上一步和自己的状态，确定下一步要使用哪个TaskHandler，并注入Task输入。
+
+Task被设计为NACEB内部最小执行单元，它的职责是执行一个具体的任务，并返回结果。
+
+每一层具体的事件、流水线和任务都是一个Instance实例，拥有自己的生命周期。其中，TaskInstance和PipelineInstance会在产生时绑定自己的Handler，并重新绑定this对象。
+
+Controller是唯一的控制Instance生命周期的状态机对象，外部只能通过 hook 观察/介入、或通过 Event 层的受控口间接触发。
 
 `failure` 是三套状态机共同的吸收态，任何态都能进入 failure，一旦进入不可迁出。具体实现是任何状态迁移failure都是豁免的。
 
 所有的队列在进入done或者failure状态后都不会自己被清除。NACEB内对完成的实例没有`清除`这个概念。只有`消费consume`，消费的含义就是明确的：取走了最终结果，并认为这个结果被`消费掉了`，这是唯一的`清除`含义。
 
-### Event
+所有的Controller都不是被公开的，但是可以从Instance和对应方法拿到Instance。
+
+### EventFSMController/EventInstance
+
+EventController 持有队列 `List<EventInstance>`，控制 scope 占用判定、blockedBy 前置检查、以及「每刻只做一个动作」的宏观限速。
+
+通过`naceb.getEvent(EventID)`、`naceb.listEvent()`等方法可以直接获得EventInstance。此外，下层也可以通过`pipeline.event`、`task.pipeline.event`等方式获得。
+
+#### tick发生时
+
+EventFSMController在接收到nextTick事件后，会：
+
+1. 检查自己的EventQueue，是否有Event标记为processing/pending/paused
+1.1. 如果Pipeline已经进入终局，将本Event标记为done/failure，并消费对应的pipeline。
+1.2. 如果Pipeline没有对应的Task（Pending还未走出第一步，或者Task已被消费），跳过接下来的动作。
+1.3. 否则询问Task类型，更新自己的状态为processing/pending。
+2. ...，是否有Event标记为activating
+2.1. 询问PipelineFSMController当前Event对应的Task类型，更新自己的状态为processing/pending。若pipeline已终局则收终局。
+3. ...，是否有Event标记为queue
+3.1. 如果有，查询同队列中是否有相同scope的Event
+3.1.1. 如果有，则保持queue
+3.1.2. 如果没有，将Event标记为activating，并激活对应pipeline，将其进入pending状态。
+4. ...，是否有Event标记为blocked
+4.1. 如果有，查询自己队列中blockedBy Event是否done、failure或者不存在。如果是，则将该Event标记为queue
+5. ...，是否有Event标记为done/failure，并且标记为bypassConsume。
+5.1. 如果是，则自我消费掉这个Event。
+
+
+
+#### 方法
+
+
+**`EventInstance.start()`**，从 idle 状态开始正式开始。push 后event默认会停留在idle状态，需要用`start`开始正式运行。
+
+**`EventInstance.pause()/.resume()`**，从Event开始向下暂停/恢复链。返回一个布尔值表示本次暂停/恢复是否成功。
+
+当暂停/任务终止时:
+
+1. Event.pause激活时，询问PipelineFSMController对应Event的Pipeline，标记自己为pause，然后await Pipeline.pause。
+2. Pipeline.pause激活时，询问Task...标记自己为pause，...
+3. Task.stop激活时，先检查自己的状态
+4. 如果是pending，直接将本task送进stopped终态，不执行。
+5. 如果已经是stopped、done终态要，返回错误，提示当前状态不能被暂停
+6. 如果是running，激活abortSignal，并等待task内任务的回调。
+7. 回调完成或者超时后（120s），将自己状态变更为stopped，然后返回。
+
+当恢复/任务重启时:
+
+1. Event.resume激活时，await Pipeline.resume，然后询问Pipeline具体的task类型，更新自己状态
+2. Pipeline.resume激活时，await Task.restart，然后更新自己状态为running
+3. Task.restart激活时检查自己状态，断言为stopped，否则报错
+4. 把自己状态改为pending，然后直接返回resume成功
+
+##### PushEvent
+
+1. NACEB检查本Event是否有合法的Pipeline
+2. NACEB检查本Event是否有blockedBy字段
+3. 如果有，那么无论这个blockedBy的原event是否存活，都直接进入队列并标记为blocked。否则进入队列并标记为queue。
+
+
+#### 状态
 
 ```mermaid
-stateDiagram-v2
-    state "idle" as idle
-    state "blocked" as blocked
-    state "queue" as queue
-    state "activating" as activating
-    state "processing" as processing
-    state "pending" as pending
-    state "paused" as paused
-
-    [*] --> idle : pushEvent
-    idle --> blocked : 有 blockedBy
-    idle --> queue : 无 blockedBy
-    blocked --> queue : 前置都 done 或不存在
-    queue --> activating : 同 scope 无占用
-    activating --> processing : 当前 task 是 blocked
-    activating --> pending : 当前 task 是 async
-    processing --> pending : 换成 async task
-    pending --> processing : 换成 blocked task
-    processing --> paused : Event.pause
-    pending --> paused : Event.pause
-    paused --> processing : resume（blocked）
-    paused --> pending : resume（async）
-    processing --> done : pipeline done
-    pending --> done : pipeline done
-    processing --> failure : pipeline failure
-    pending --> failure : pipeline failure
+flowchart TD
+    START((*)) -->|pushEvent| idle
+    idle -->|有 blockedBy| blocked
+    idle -->|无 blockedBy| queue
+    blocked -->|前置都 done 或不存在| queue
+    queue -->|同 scope 无占用| activating
+    activating -->|当前 task 是 blocked| processing
+    activating -->|当前 task 是 async| pending
+    processing -->|换成 async task| pending
+    pending -->|换成 blocked task| processing
+    processing -->|Event.pause| paused
+    pending -->|Event.pause| paused
+    paused -->|resume（blocked）| processing
+    paused -->|resume（async）| pending
+    processing -->|pipeline done| done([done])
+    pending -->|pipeline done| done
+    processing -->|pipeline failure| failure([failure])
+    pending -->|pipeline failure| failure
 ```
 
-**`idle`** 是所有 event 的起点。push 进来默认 idle。它没有 hook、不发事件，并且被tick激活器完全无视。idle 的主要意义是给外部唯一一个去挂 hook 的窗口，在`pushEvent` 拿到 event 对象后才能挂 hook。只有外部 `start()` 才真正入场；也可以 push 时带 `bypassIdle` 让 NACEB 内部立即 start。
+**`idle`** 是所有 event 的起点。主要意义是给外部唯一一个去挂 hook 的窗口，在`pushEvent` 拿到 event 对象后才能挂 hook。只有外部 `start()` 才真正入场；也可以 push 时带 `bypassIdle` 让 NACEB 内部立即 start。
 
 > 如果没有idle或者尝试在bypassIdle时去挂载hook或者监听event，会有显著的脱同步问题，最开始的几个监听器可能完全挂不上。这个状态就是专门等着外部上挂监听器或者hook用的。
 
@@ -148,27 +233,42 @@ stateDiagram-v2
 
 **`activating`** NACEB 在此 new 出 pipeline 实例。这个状态是一个非常短暂的激活态。这个激活态的生命周期只有一个tick，在下一个tick应该会更新为`processing` 或 `pending`。
 
-**`processing` 与 `pending`** 是有 task 在跑的两种形态。processing的含义表示当前Event对应的Pipeline对应的Task（以下统称为Event对应的Task）是async还是blocked类型。async则对应pending，表示等待一个异步任务。processing表示执行中，表示一个blocked资源阻塞任务。
+**`processing` 与 `pending`** 是有 task 在跑的两种形态。当前 task 是 blocked 类型时 Event 为 processing，表示一个占用资源的阻塞任务正在执行；当前 task 是 async 类型时 Event 为 pending，表示等待一个不占资源的异步任务。
 
 **`paused`** 是被 `Event.pause` 挂起的态，tick激活器默认跳过这个状态。只有 `Event.resume` 能把它转移出来。当resume被激活后，会直接重试运行上一个任务，并将自己的状态更新为这个任务的类型。
 
 **`done` 与 `failure`** 是终局。done 是正常收束（`$terminal` task 跑完），failure 是异常终止。终局后 event 不会被删除，等外部**消费**；若 push 时带了 `bypassConsume`，则终局后由 NACEB 在 perTick 里自动消费清除。
 
-### Pipeline
+
+
+
+### PipelineController/PipelineInstance
+
+#### Tick发生时
+
+PipelineController在接收到nextTick事件后，会：
+
+1 检查自己的PipelineRecord中，是否有Pipeline标记为running
+1.1 如果有，询问TaskFSMController对应的Task情况是否为done/stopped/failure
+1.1.1 如果是done，消费该Task结果。
+1.1.1.1 如果本Task是"$terminal"，标记自己为done，并保存结果到p.result.final。
+1.1.1.2 如果不是，激活Pipeline.next(lastResult)，将上一步结果直接作为输入传入，不保存在instance。
+1.1.2 如果是stopped，标记自己为paused。
+1.1.3 如果是failure，消费Task并标记自己为failure。
+2 是否有Pipeline标记为pending
+2.1 如果有，激活这个Pipeline.next()
+
+#### 状态
 
 ```mermaid
-stateDiagram-v2
-    state "pending" as pending
-    state "running" as running
-    state "paused" as paused
-
-    [*] --> pending : Event在Activating下一步<br>PipelineFSMController.activate()
-    pending --> running : next 派下一个 task
-    running --> running : next 派下一个 task</br>（同态）
-    running --> paused : task stopped
-    running --> done : $terminal task done
-    running --> failure : task failure</br>或next异常
-    paused --> running : resume
+flowchart TD
+    START((*)) -->|"Event在Activating下一步<br>PipelineFSMController.activate()"| pending
+    pending -->|next 派下一个 task| running
+    running -->|next 派下一个 task<br>（同态）| running
+    running -->|task stopped| paused
+    running -->|$terminal task done| done([done])
+    running -->|task failure<br>或next异常| failure([failure])
+    paused -->|resume| running
 ```
 
 `pending` Pending是由PipelineFSMController.activate()新建的PipelineInstance。进入pending态后在下一个tick执行一次next并进入running态。
@@ -181,21 +281,50 @@ stateDiagram-v2
 
 Pipeline 状态机不关心业务 phase（并且，Pipeline流程也没有phase这个说法）。Pipeline最核心的用途，就是告诉TaskFSMController，**下一步**要派发那个TaskHandler，输入给它的是什么。
 
-### Task
+
+### TaskController/TaskInstance
+
+NACEB 内建三个特权 TaskHandler，名字以 `$` 前缀保留。
+
+它们和普通 task 一样由 PipelineHandler 的 `next` 按名派出，都是 **async** task。由 NACEB 装配时自动构造。
+
+|名称|作用|传入参数|
+|---|---|---|
+|`$terminal`|Pipeline结束后必须以此任务作为最后一个任务，返回结果给Pipeline|` { task: '$terminal', input: {} }`|
+|`$fire4SubEvent`|派发一个新的独立子Event，派发完毕后立刻返回`{childId}`作为结果|` { task: '$fire4SubEvent', input: { pipelineName, payload } }`|
+|`$wait4SubEvent`|派发一个新的独立子Event，派发完毕后**等待**其完成，并将子Event结果作为父Event的结果返回|` { task: '$wait4SubEvent', input: { pipelineName, payload } }`|
+
+这些任务在NACEB创建时就作为内建Task存在。特权在于，他们闭包捕获了外部编排能力。
+
+Pipeline执行的时候不需要标注`final`，也不需要用什么特殊的方式告诉NACEB“这是最后一个任务”。只要PipelineHandler在next里返回了`$terminal`，NACEB就会自动收束这个Pipeline。
+
+两个SubEvent发生Task具有以下特征：
+
+- 输入时不接受scope和blockedBy，避免死锁。
+- fire4SubEvent子任务默认bypassConsume。
+- wait4SubEvent子任务失败后，父任务会消费失败结果并将自己状态转移到failure。
+
+还需要注意的是，这些内建Task都是async类型的。
+
+SubEvent和Event都是一等公民。换句话说，一个外部引发的Event和内建的SubEvent本质没有区别，SubEvent只会额外携带一个parentId，标记自己的父EventID。
+
+#### tick发生时
+
+1 检查双TaskQueue中，有无任务标记为pending。
+1.1 如果有，检查是否为async或者可被放行的blocked task。
+1.1.1 如果是，执行该任务，并将状态更新为running。
+
+#### 状态
 
 ```mermaid
-stateDiagram-v2
-    state "pending" as pending
-    state "running" as running
-    state "stopped" as stopped
-
-    [*] --> pending : TaskFSMController.dispatch
-    pending --> running : 放行
-    pending --> stopped : 未放行即被 pause 打断
-    running --> done : 正常 return Response
-    running --> stopped : abort 拉起, 停止并进入stopped
-    running --> failure : execute throw
-    stopped --> pending : restart 重启
+flowchart TD
+    START((*)) -->|TaskFSMController.dispatch| pending
+    pending -->|放行| running
+    pending -->|未放行即被 pause 打断| stopped
+    running -->|正常 return Response| done([done])
+    running -->|abort 拉起, 停止并进入stopped| stopped
+    running -->|execute throw| failure([failure])
+    stopped -->|restart 重启| pending
 ```
 
 `pending` 同理，本状态是由TaskFSMController.dispatch()新建的TaskInstance。在下一个tick检查busylane（如果是asyncTask，直接送进asyncQueue并进入running，然后execute；如果是blockedTask，那需要检查lane有没有被占用，如果有则不激活）
@@ -208,22 +337,158 @@ stateDiagram-v2
 
 重启后Instance会保留，同时保留所有的hook和state，便于内部重建（这也是TaskInstance.state的唯一意义）。
 
+
 ## NACEB.eventbus
 
+EventBus通用机制请见 [NASDK EventBus](./eventbus.md)，本节只讲 NACEB 这一侧的约定。
+
+NACEB 构造时 `new EventBus()` 创建一个独立实例。
+
+NACEB 只发以下两类事件，完整清单、字段见 [观测 → EventBus](#eventbus)。
+
+- **T 事件** `naceb:{layer}:{state}:{phase}:{id}`，由每层 Instance 的 `_transition` 经 THookHandler 发出，先 emit 再跑同名 hook。
+- **运行时事件** `naceb:runtime:{level}:{id}`，level 是 `error` / `warning` / `log` / `message`。
+
+T 事件 payload 恒为 `undefined`，内部数据请使用在 `this` 上。`this` 是对应 Instance 的 `readonlyView`。
+运行时事件则相反，数据均通过 payload 传输。
+
+```ts
+// T 事件
+naceb.eventBusObs.listen('naceb:task:done:after:*', function () {
+  console.log(this.id, this.status)   // 'task_xxx' 'done'
+})
+
+// 运行时事件
+naceb.eventBusObs.listen('naceb:runtime:log:*', (p) => {
+  console.log(p.opt.from, '→', p.opt.to)
+})
+```
+
+## NACEB.taskHandlers / TaskHandler
+
+taskHandlers 是带 `register/list/remove/get` 方法的公开注册表对象，内部持有一个简单的Map，用于保存TaskHandler。
+
+> 说白了NACEB.taskHandlers就是存储TaskHandler的容器列表。
+
+在构造NACEB时通过 `opts.taskHandlers` 数组批量注入，在运行时可通过 `naceb.taskHandlers.register(h)` 追加。
+
+- `register(h)` — 以 `h.name` 为 key 注册，重名后者覆盖
+- `list()` — 返回所有 TaskHandler 的数组
+- `remove(name)` — 按名移除
+- `get(name)` — 按名查找，返回 `TaskHandler | undefined`
+
+无论是注入还是register追加，都只接受TaskInstance的具体extend实现。
+
+TaskHandler不关心事件、Pipeline、状态机、队列、资源占用等问题（这些由TaskController负责），它只关心自己的输入和输出。
+
+如果设置了busyKeys，TaskHandler会被视为BlockedTask，否则是AsyncTask。BlockedTask会占用对应Lane资源，AsyncTask不会。
+
+同时，TaskHandler也内部持有abortSignal，在编写具体的excute逻辑时可以通过this.abortSignal来判断是否被外部中止，并提前终止自己内部逻辑。
+
+> NACEB TaskHandler的终止被设计为协商式的，也就是说，TaskHandler内部的execute逻辑必须自己判断abortSignal是否被激活，并在适当时机终止自己的逻辑。NACEB不会强制中止正在执行的TaskHandler。
+>
+> 当然，如果再发起终止信号后一段时间Task还没有提前返回（默认120s），NACEB也会放弃等待，内部会触发stop-timeout错误并视为暂停已完成。
+
+TaskHandler内部可以通过`this.processingResultReport(delta)`来流式上报中间结果。
+
+外部可以通过`naceb.eventBusObs.listen(`naceb:runtime:message:${eventId}`, (p)=>{})`来监听中间结果。
+
+> NACEB自带的NACPAdpator会把这个中间结果转为普通的`onProgress`回调，两者是等价的。
+
+```ts
+class CollatzConjectureODDTask extends TaskHandler {
+  name = 'Collatz Conjecture Odd'
+  description = '冰雹函数奇数处理' //描述是可选的，但推荐写一下
+  async execute() {
+    return this.input * 3 + 1
+  }
+}
+
+class CollatzConjectureEVENTask extends TaskHandler {
+  name = 'Collatz Conjecture Even'
+  description = '冰雹函数偶数处理'
+  busyKeys = undefined //默认情况下不指定busyKey，本任务会视为异步任务，不会占用任何Lane资源。并且Async任务是并发的。
+  async execute() {
+    return this.input / 2
+  }
+}
+
+class TextCompletionTask extends TaskHandler {
+  name = 'LLM Text Completion'
+  description = '大语言模型文本补齐'
+  busyKeys = ['gpu'] //指定了busyKey，表示这个任务会占用llm lane资源。lane资源是全局唯一的，所有指定了同一个busyKey的任务都共享同一个lane资源。被占用的lane资源会阻塞其他同busyKey的任务，直到本任务完成。
+  async execute() {
+    for await (const delta of llm.stream(this.input.prompt)) {
+      if (this.abortSignal.aborted) return        // TaskHandler
+      //or，使用this.abortSignal.addEventListener('abort', ()=>{})来监听
+      this.processingResultReport(delta)          // 在发生中间结果时，调用 processingResultReport 上报给外部。外部可以通过 eventBus 监听到这个中间结果。
+    }
+    return { text: full }                         // 结束，返回最终结果
+  }
+}
+
+//随后，你可以在 NACEB 构造时注入这个 TaskHandler：
+const naceb = new NACEB({ taskHandlers: [new CollatzConjectureODDTask(), new CollatzConjectureEVENTask()] })
+//或者，在构造后添加
+naceb.taskHandlers.register(new TextCompletionTask())
+```
 
 
+## NACEB.pipelineHandlers / PipelineHandler
 
-## NACEB.pipelineHandlers
+pipelineHandler的添加方式和taskHandler完全一致，都是通过构造时注入或者运行时追加。
 
-## NACEB.taskHandlers
+next函数默认接受一个参数 `lastResult`，它是上一步`TaskHandler`的输出。第一次调用时，`lastResult` 为 `undefined`。
+
+next函数内，this被指向了PipelineInstance本身，因此，可以在next里访问PipelineInstance的状态、事件、跨步状态等，同时，所有的Instance都持有一个空Record类型的`state`，用于跨步存储状态。
+
+> Pipeline的被故意设计为一个机械前进器。当运行到这一步时，将上一步的输出和状态作为下一步的输入，从而决定下一步怎么走。
+>
+> Pipeline的输出被限定指导下一步使用什么taskHandler处理和输入，具体的task执行并不由Pipeline决定。
+>
+> 需要注意的是，PipelineHandler在执行next的时候不会校验输入的新装是否符合TaskHandler的输入要求。
+
+```ts
+class CollatzConjecturePipe extends PipelineHandler {
+  name = 'Collatz Conjecture'
+  description = '冰雹函数'
+  next(lastResult) {
+    if (lastResult === undefined) {
+      this.state.history = []
+      lastResult = this.event.payload.inputNumber
+    } else this.state.history.push(lastResult)
+    if (lastResult === 1) return { task: '$terminal', input: { result: this.state.history.length, history: this.state.history } }
+    if (lastResult % 2 === 0) return { task: 'Collatz Conjecture Even', input: lastResult }
+    else return { task: 'Collatz Conjecture Odd', input: lastResult }
+  }
+}
+
+//随后，你可以在 NACEB 构造时注入这个 PipelineHandler：
+const naceb = new NACEB({ pipelineHandlers: [new CollatzConjecturePipe()] })
+
+//或者，在构造后添加
+naceb.pipelineHandlers.register(new CollatzConjecturePipe())
+```
 
 ## NACEB.eventAlias
 
-## TaskController
+EventAlias与两个HandlersList相反，他就是一个非常简单的别名，用于指定Event的默认Pipeline。
 
-## PipelineController
+由于NACEB在设计上是让Event去指定Pipeline的，但是有一部分Event上报时不会挟带管线名，因此可以用这个列表默认指定。
 
-## EventController
+同样允许在构造时和允许时修改绑定：
+
+```ts
+const naceb = new NACEB( { eventName: 'ChatEvent', pipelineName: 'chat',     description: '普通对话' })
+
+naceb.eventAlias.register({ eventName: 'ChatEvent', pipelineName: 'chat-v3', description: '...' })
+
+naceb.eventAlias.remove('ChatEvent')
+```
+
+
+
+
 
 
 
@@ -254,11 +519,7 @@ Veto否决会导致本次转移失败，状态会保持在完全没有开始转�
 > 警告，如果你在Hook内实现的函数发生了了UnhandledError，我们不会视为Veto，而被视为致命错误，对应层状态会直接进入failure表示介入失败。如果在Event层出现，会引发Event、Pipeline和Task的级联终止。这一刻会被阻塞直到这一层以下的内容被终止并消费干净。如果Hook错误发生在Pipeline或Task，则自己回立刻进入Failure，并在下一tick同步到上面的Layer。
 > 如果这次致命错误本来就发生在转移Failure时，TFailure的所有Hook都会被禁用（不包括EventBus的Emit）。
 > 
-> Veto主要应用于Event事件，Event全部T事件都可以被Veto。Task可以在TRunning时Veto。Pipeline和Task其他T事件则完全不允许。
->
-> Pipeline的所有事件驱动是既定事实，如果要修改，应该介入更底层的Task。而Task本身开始运行后事件驱动也是既定事实，无法被Veto。
-> 
-> 并且，Task.beforeTStopped和Pipeline.beforeTPause也是不允许Veto的！如果需要Veto暂停链，请在Event.beforeTPaused抛出拒绝，此时，Event.pause会返回false。
+> Veto主要应用于Event事件，Event全部T事件都可以被Veto。Task仅可在beforeTRunning时Veto，其余T事件（done/failure/stopped）已是既定事实不可否决。Pipeline所有T事件均不可Veto。
 >
 > 此外，如果一个转移被Veto，它的副作用不会被激活，但是仍会被视为一次虚拟的moved，从而快速激活下一刻。
 
@@ -402,109 +663,54 @@ T事件和THook是等价的，内部绑定的this也是对应的Instance。
 
 #### 运行时事件
 
+统一格式为 `naceb:runtime:{level}:{id}`。payload也统一 `{ layer, id, msg?, opt? }`。
+
+与T事件不同的是，这里的this并不绑定对应的Instance。
+
+| key | 触发时机 | {id} | opt |
+|-----|---------|------|-----|
+| `naceb:runtime:message:{eventId}` | `TaskInstance.processingResultReport(chunk)` | eventId | `{ taskId, eventId, pipelineId, chunk }` |
+| `naceb:runtime:error:{id}` | after hook 抛异常 / 运行时错误 | 触发层 instance id | `{ state, phase, error }` |
+| `naceb:runtime:warning:{id}` | 运行时警告 | 触发层 instance id | `{ reason, error }` |
+| `naceb:runtime:log:{id}` | 状态迁移 / idle / consume | 触发层 instance id | `{ from, to, same, ... }` |
+
+
+## 刻
+
+刻是NACEB唯一的推进机制。三个Controller的nextTick本身不会自己运行，必须由alertTick依次唤醒。
+
+每个Controller在tick激活后会做什么，请参阅上述Controller部分的“tick发生时”章节。
+
+只有Controller会遵循刻机制，其中EventController是严格遵循刻机制，只在一个刻内做一个动作。
+
+本节主要讲刻的发生。
+
+### alertTick
+
+alertTick是激活刻的唯一入口。
+
+当alertTick被激活时，会依次调用Controller的三个nextTick方法，按照机械规则推进。
+
+如果三个nextTick任意之一发生了状态转移，则alertTick会在本tick结束后立刻激活下一刻，这一机制被称为快进刻。
+
+### ensureClock
+
+基础时钟，每隔50ms激活一次alertTick，确保NACEB在没有外部激活的情况下仍然以最低频率运行。
+
+当EventQueue内部没有需要继续照顾的idle时，ensureClock会暂停工作，直到下一次外部事件触发（pushEvent或start/stop）
+
+> Q：这是否意味着每个Event同步间隔要超过50ms？
+>
+> A：并不会。如果Event在一刻中产生了一次状态转移，快进刻机制会立刻激活下一刻。因此，一个正常的Event在状态改变时时间间隔是几乎忽略不计的。
+
+### 快进刻
+
+当在一个刻结束时，如果这一刻发生了状态转移，则会通过settimeout立即激活下一刻，这一机制被称为快进刻。
+
+快进刻确保了当队列里真的有任务时，NACEB会以最快的速度推进状态机。
 
 
 
-## 事件与同步
-
-内部NACEB事件只有三种可能
-
-1. 来自外部的pushEvent 
-2. 来自外部的Event.pause/Event.resume 
-3. 来自内部的Ticker
-
-其中，内部的Ticker同时收束了定时发生器和事件完成后的催促，具体见下章。
-
-### TickAlert机制
-
-### pause/resume机制
-
-### 外部pushEvent
-
-
-
-
----
-
-# Draft
-
-## API 
-
-
-
-## 内部事件来源
-
-内部NACEB事件只有三种可能：1. 来自外部的pushEvent 2.来自外部的Event.pause Pipeline.pause Task.stop/Event.resume Pipeline.resume Task.restart 3.来自内部的Ticker
-
-### Ticker
-
-NACEB的alertTick被激活时，每个Tick需要执行三个Controller的alertTick。
-
-
-
-1.TaskFSMController
-1.1 检查双TaskQueue中，有无任务标记为pending。
-1.1.1 如果有，检查是否为async或者busykey都是空闲的blocked task。
-1.1.1.1 如果是，在TaskRunner中execute该任务。期间可以用tCtx的processingResultReport广播中间结果。
-
-2.PipelineFSMController
-2.1 检查自己的PipelineRecord中，是否有Pipeline标记为running
-2.1.1 如果有，询问TaskFSMController对应的Task情况是否为done/stopped
-2.1.1.1 如果是done，消费该Task结果（获取Task Result保存到PipelineRecord、告知TaskFSMController移除该Task）
-2.1.1.1.2 读取TaskResult。如果是Finally，激活pCtx的finalResultReport广播最终结果并标记自己为done。如果不是，激活Pipeline.next()
-2.1.1.2 如果是stopped，标记自己为paused。
-2.1.1.3 如果是failure，移除Task并标记自己为failure，并激活pCtx的finalResultReport。
-2.2 检查自己的PipelineRecord中，是否有Pipeline标记为pending
-2.2.1 如果有，激活这个Pipeline.next()
-
-3.EventFSMController
-3.1 检查自己的EventQueue，是否有Event标记为processing/pending
-3.1.1 询问PipelineFSMController本Event的执行情况，是否为done/failure
-3.1.1.1 如果是done，将本Event标记为done，并告知PipelineFSMController移除对应的pipeline。
-3.1.1.2 如果是failure，将本Event标记为failure，并告知PipelineFSMController移除对应的pipeline。
-3.1.1.3 否则根据PipelineFSMController获得的Task类型，转换自己的processing/pending
-3.2 检查自己的EventQueue，是否有Event标记为activating
-3.2.1 询问PipelineFSMController当前Event对应的Pipeline对应的Task的类型，并更新自己的状态。如果pipeline还在pending状态，不更新。
-3.3 检查自己的EventQueue，是否有Event标记为queue
-3.3.1 如果有，查询同队列中是否有相同scope的Event
-3.3.1.1 如果有，则保持queue
-3.3.1.2 如果没有，将Event标记为activating，并激活对应pipeline，将其进入pending状态。
-3.4 检查自己的EventQueue，是否有Event标记为blocked
-3.4.1 如果有，查询自己队列中blockedBy Event是否done或者不存在
-3.4.2 如果done或者不存在，则将该Event标记为queue
-
-（注意回收本Event是外部信号告知 EventFSMController 移除。EventFSMController是不能在perTick里移除自己队列里的内容的，因为不知道自己的结果有没有被消费掉）
-
-### PushEvent
-
-当外部通过NACEB的pushEvent接口发送时，会发生以下事情：
-
-1. NACEB检查本Event是否有合法的Pipeline
-2. NACEB检查本Event是否有blockedBy字段
-3. 如果2为真，那么无论这个blockedBy的原event是否存活，都直接进入队列并标记为blocked。否则进入队列并标记为queue。
-
-### 暂停与继续
-
-NACEB允许外部直接控制对应的Event、Pipeline和Task的暂停。
-
-其中，Event.pause Pipeline.pause Task.stop三者均是等效Task.stop，resume/restart也是。
-
-当暂停/任务终止时:
-
-1. Event.pause激活时，询问PipelineFSMController对应Event的Pipeline，标记自己为pause，然后await Pipeline.pause。
-2. Pipeline.pause激活时，询问Task...标记自己为pause，...
-3. Task.stop激活时，先检查自己的状态
-4. 如果是pending，直接将本task送进stopped终态，不执行。
-5. 如果已经是stopped、done终态要，返回错误，提示当前状态不能被暂停
-6. 如果是running，激活abortSignal，并等待task内任务的回调。
-7. 回调完成或者超时后（120s），将自己状态变更为stopped，然后返回。
-
-当恢复/任务重启时。
-
-1. Event.resume激活时，await Pipeline.resume，然后询问Pipeline具体的task类型，更新自己状态
-2. Pipeline.resume激活时，await Task.restart，然后更新自己状态为running
-3. Task.restart激活时检查自己状态，断言为stopped，否则报错
-4. 把自己状态改为pending，然后直接返回resume成功
 
 ### 备注
 
@@ -515,3 +721,4 @@ perTick激活时，每个Controller只能控制自己和下层的内容，永远
 在三个Controller的alertTick执行完之前，NACEB的alertTick将自锁。
 
 所有叶子节点如果被执行，EventController将在本tick下return。Pipeline和Task不会限制。
+
