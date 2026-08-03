@@ -145,10 +145,15 @@ export class TaskInstance {
       this.abort.abort('stopped')
       // 最多等 ctrl.stopTimeoutMs 收尾；超时则不再干等（execute Promise 后台自生自灭），emit 告知。
       if (this._donePromise) {
-        const timeout = new Promise<'timeout'>(res => setTimeout(() => res('timeout'), this.ctrl.stopTimeoutMs))
-        const r = await Promise.race([this._donePromise.then(() => 'done' as const), timeout])
-        if (r === 'timeout')
-          this.ctrl.ref.emit('error', this.eventId, { layer: 'task', id: this.eventId, msg: `task ${this.name}#${this.id} 未在 ${this.ctrl.stopTimeoutMs}ms 内响应 abort（_stop 超时）`, opt: { taskId: this.id, reason: 'stop-timeout' } })
+        // ⚠️ 必须 clearTimeout：Promise.race 只是忽略输的一方、不会取消它。task 正常响应 abort 时这个
+        // stopTimeoutMs（默认 120s）定时器会继续挂在事件循环上，把宿主进程按住整整两分钟不退出。
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const timeout = new Promise<'timeout'>(res => { timer = setTimeout(() => res('timeout'), this.ctrl.stopTimeoutMs) })
+        try {
+          const r = await Promise.race([this._donePromise.then(() => 'done' as const), timeout])
+          if (r === 'timeout')
+            this.ctrl.ref.emit('error', this.eventId, { layer: 'task', id: this.eventId, msg: `task ${this.name}#${this.id} 未在 ${this.ctrl.stopTimeoutMs}ms 内响应 abort（_stop 超时）`, opt: { taskId: this.id, reason: 'stop-timeout' } })
+        } finally { clearTimeout(timer) }
       }
       return
     }

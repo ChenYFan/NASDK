@@ -11,8 +11,8 @@ import {
   TaskHandler, TaskResponse, TASK_TRANSITIONS, cap, isBlocked,
   TERMINAL, FIRE4SUBEVENT, WAIT4SUBEVENT, BUILTIN_NAMES,
 } from '../types.ts'
-import type { TaskStatus, PipelineStep, SubEventSpec, NacebRef, HookFn, NacebPrivateRef } from '../types.ts'
-import type { Naceb } from '../NACEB.ts'
+import type { TaskStatus, PipelineStep, SubEventSpec, NACEBRef, HookFn, NACEBPrivateRef } from '../types.ts'
+import type { NACEB } from '../NACEB.ts'
 import { TaskInstance } from '../instance/TaskInstance.ts'
 export { TaskInstance } from '../instance/TaskInstance.ts'
 import type { PipelineInstance } from '../instance/PipelineInstance.ts'
@@ -31,7 +31,7 @@ function makeTerminalHandler(): TaskHandler {
   }()
 }
 
-function makeFire4SubEventHandler(ref: NacebRef): TaskHandler {
+function makeFire4SubEventHandler(ref: NACEBRef): TaskHandler {
   return new class extends TaskHandler<{ childId: string }> {
     readonly name = FIRE4SUBEVENT
     async execute(this: TaskInstance): Promise<{ childId: string }> {
@@ -46,7 +46,7 @@ function makeFire4SubEventHandler(ref: NacebRef): TaskHandler {
   }()
 }
 
-function makeWait4SubEventHandler(ref: NacebRef): TaskHandler {
+function makeWait4SubEventHandler(ref: NACEBRef): TaskHandler {
   return new class extends TaskHandler<unknown> {
     readonly name = WAIT4SUBEVENT
     async execute(this: TaskInstance): Promise<unknown> {
@@ -73,10 +73,10 @@ export class TaskFSMController {
   asyncQueue: TaskInstance[] = []
   protected byId = new Map<string, TaskInstance>()
   stopTimeoutMs = 120000   // _stop 里 abort 后最多等 task 内任务回调收尾的时长（120s）；超时视为收尾（execute Promise 后台自生自灭）。影响 pause 与 forceCleanEventUnderLayer 清理。
-  naceb: Naceb
-  ref: NacebPrivateRef
+  naceb: NACEB
+  ref: NACEBPrivateRef
 
-  constructor(naceb: Naceb, ref: NacebPrivateRef) {
+  constructor(naceb: NACEB, ref: NACEBPrivateRef) {
     this.naceb = naceb; this.ref = ref
   }
 
@@ -133,6 +133,6 @@ export class TaskFSMController {
   }
 }
 
-export function builtinHandlers(ref: NacebRef): TaskHandler[] {
+export function builtinHandlers(ref: NACEBRef): TaskHandler[] {
   return [makeTerminalHandler(), makeFire4SubEventHandler(ref), makeWait4SubEventHandler(ref)]
 }

@@ -7,8 +7,8 @@
  */
 
 import { PIPELINE_TRANSITIONS, cap, TERMINAL } from '../types.ts'
-import type { PipelineStatus, PipelineStep, PipelineHandler, HookFn, NacebPrivateRef } from '../types.ts'
-import type { Naceb } from '../NACEB.ts'
+import type { PipelineStatus, PipelineStep, PipelineHandler, HookFn, NACEBPrivateRef } from '../types.ts'
+import type { NACEB } from '../NACEB.ts'
 import type { TaskFSMController, TaskInstance } from './TaskFSMController.ts'
 import type { EventInstance } from '../instance/EventInstance.ts'
 import { PipelineInstance } from '../instance/PipelineInstance.ts'
@@ -19,10 +19,10 @@ export { PipelineInstance } from '../instance/PipelineInstance.ts'
 // ============================================================
 export class PipelineFSMController {
   queue: PipelineInstance[] = []
-  naceb: Naceb
-  ref: NacebPrivateRef
+  naceb: NACEB
+  ref: NACEBPrivateRef
 
-  constructor(naceb: Naceb, ref: NacebPrivateRef) {
+  constructor(naceb: NACEB, ref: NACEBPrivateRef) {
     this.naceb = naceb; this.ref = ref
   }
   isRegistered(name: string) { return !!this.naceb.pipelineHandlers.get(name) }

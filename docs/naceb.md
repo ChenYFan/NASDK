@@ -13,7 +13,7 @@ NACEB 不负责理解事件内容，也不负责定义业务流程；因此，�
 
 NACEB对payload应该是opaque的，换句话说不应该关注负载的内容，只能机械丢给对应的Pipeline。Pipeline内则没有限制。
 
-NACEB一般是NACP的Event直接下游，详情见.nacpAdapator章节。
+NACEB一般是NACP的Event直接下游，详情见.nacpAdaptor章节。
 
 NACEB 将所有 Task 分为 BlockedTask 与 AsyncTask，以允许一部分任务不占用任何资源，
 
@@ -53,7 +53,7 @@ NACEB
 ├── bus: EventBus   
 ├── tickAlert: alertTick                              
 ├── pipelineHandlers:
-│   ├── Map<PipeineName<String>, PipelineHandler>   
+│   ├── Map<PipelineName<String>, PipelineHandler>   
 │   └── register/list/remove/get/...
 ├── taskHandlers:
 │   ├── Map<TaskName<String>, TaskHandler>   
@@ -81,12 +81,12 @@ NACEB
 
 queue里面存储的是完整的Instance。这是已经实例化的运行当中的完整对象。对象即状态、即能力。
 
-Handler必须是无状态的。Handler的this应该直接绑定到Instance上。Handler内如果要修改当前实例的状态，最终存储的地方应该是Instance而不是Handler，因为Handler在一轮任务完成后会被销毁。
+Handler必须是无状态的。Handler的this应该直接绑定到Instance上。Handler内如果要修改当前实例的状态，最终存储的地方应该是Instance而不是Handler，因为Handler是注册表里长期存活的共享逻辑定义，会被多个Instance复用；真正在一轮执行完成并被消费后销毁的是Instance。
 
 Controller持有InstanceQueue，完成Instance的生命周期轮转。Controller不持有Handlers。如果需要访问，同样走`this.naceb`从顶层绕路。
 
 ```ts
-class Naceb {
+class NACEB {
   constructor(opts: {
     pipelineHandlers: PipelineHandler[]          
     taskHandlers:     TaskHandler[]
@@ -117,9 +117,18 @@ class Naceb {
   consumeEvent(id: string): unknown            
   readonly eventBus: EventBus     
   get eventBusObs(): ReadonlyBus            
-  on<K extends keyof NacebHooks>(hook: K, fn: NacebHooks[K]): void
+  on<K extends keyof NACEBHooks>(hook: K, fn: NACEBHooks[K]): void
 }
 ```
+
+> **关于 `eventBus` 为什么是公开的**
+>
+> 注意 `eventBus` 是完整 EventBus（带 emit），而 `eventBusObs` 只是它的只读视图。TypeScript 的 `readonly` 只禁止给字段重新赋值，**不禁止调用 `naceb.eventBus.emit(...)`**——换句话说，外部拿到 NACEB 实例就能往总线上发事件，包括伪造 `naceb:event:*` 这样的 T 事件。
+>
+> 这是**刻意为之**，不是疏漏。观测的推荐路径始终是 `eventBusObs`（惯例上外部只订阅、不发送），但保留完整 bus 是为了给宿主留一个介入口：适配层（如 `nacpAdaptor`）、测试与调试注入、以及把外部系统的信号并进同一条观测流，都需要 emit 能力。如果收成 `private`，这些场景就只能靠再包一层转发。
+>
+> 因此使用约定是社会性的而非强制的：**除非你明确知道自己在做宿主侧集成，否则一律用 `eventBusObs`**。往 `naceb:*` 命名空间伪造 T 事件会让观测者读到与状态机不一致的状态（T 事件的 `this` 本应由状态机绑定真实 Instance），后果自负。
+
 
 
 ## Layer、Controller与Instance
@@ -152,20 +161,20 @@ EventController 持有队列 `List<EventInstance>`，控制 scope 占用判定�
 
 EventFSMController在接收到nextTick事件后，会：
 
-1. 检查自己的EventQueue，是否有Event标记为processing/pending/paused
+EventFSMController在接收到nextTick事件后，会按下述顺序扫描，**做成一个动作就 return**（每刻只做一个动作的宏观限速）。全程**跳过 idle 与 paused**——它们是 tick 豁免态，分别等外部 `start()` 与 `resume()`。
+
+1. 检查自己的EventQueue，是否有Event标记为 processing/pending/**activating**（三者同一步处理：都是「已有 pipeline，需要与其对齐」）
 1.1. 如果Pipeline已经进入终局，将本Event标记为done/failure，并消费对应的pipeline。
-1.2. 如果Pipeline没有对应的Task（Pending还未走出第一步，或者Task已被消费），跳过接下来的动作。
-1.3. 否则询问Task类型，更新自己的状态为processing/pending。
-2. ...，是否有Event标记为activating
-2.1. 询问PipelineFSMController当前Event对应的Task类型，更新自己的状态为processing/pending。若pipeline已终局则收终局。
-3. ...，是否有Event标记为queue
-3.1. 如果有，查询同队列中是否有相同scope的Event
-3.1.1. 如果有，则保持queue
-3.1.2. 如果没有，将Event标记为activating，并激活对应pipeline，将其进入pending状态。
-4. ...，是否有Event标记为blocked
-4.1. 如果有，查询自己队列中blockedBy Event是否done、failure或者不存在。如果是，则将该Event标记为queue
-5. ...，是否有Event标记为done/failure，并且标记为bypassConsume。
-5.1. 如果是，则自我消费掉这个Event。
+1.2. 如果Pipeline没有对应的Task（pending 还未走出第一步，或者Task已被消费），跳过本Event、继续看下一个。
+1.3. 否则询问Task类型，把自己对齐为 processing（blocked task）/ pending（async task）。已经是目标态则不动。
+2. ...，是否有Event标记为queue
+2.1. 如果有，查询同队列中是否有相同scope的Event正在占用（activating/processing/pending/paused 均算占用）
+2.1.1. 如果有，则保持queue
+2.1.2. 如果没有，将Event标记为activating，并在该转移的副作用里new出对应pipeline（进入pending状态）。
+3. ...，是否有Event标记为blocked
+3.1. 如果有，查询自己队列中blockedBy Event是否done、failure或者不存在。如果是，则将该Event标记为queue
+4. ...，是否有Event标记为done/failure，并且标记为bypassConsume。
+4.1. 如果是，则自我消费掉这个Event。**这一步不占用「每刻一个动作」的额度**，会在一趟里把所有符合条件的都清掉。
 
 
 
@@ -182,7 +191,7 @@ EventFSMController在接收到nextTick事件后，会：
 2. Pipeline.pause激活时，询问Task...标记自己为pause，...
 3. Task.stop激活时，先检查自己的状态
 4. 如果是pending，直接将本task送进stopped终态，不执行。
-5. 如果已经是stopped、done终态要，返回错误，提示当前状态不能被暂停
+5. 如果已经是stopped、done等终态，返回错误，提示当前状态不能被暂停
 6. 如果是running，激活abortSignal，并等待task内任务的回调。
 7. 回调完成或者超时后（120s），将自己状态变更为stopped，然后返回。
 
@@ -195,9 +204,17 @@ EventFSMController在接收到nextTick事件后，会：
 
 ##### PushEvent
 
-1. NACEB检查本Event是否有合法的Pipeline
-2. NACEB检查本Event是否有blockedBy字段
-3. 如果有，那么无论这个blockedBy的原event是否存活，都直接进入队列并标记为blocked。否则进入队列并标记为queue。
+`pushEvent` **永远只把 Event 建成 idle 并入队**，不做任何 blockedBy/scope 判定——那些判定发生在 `start()` 与后续的 tick 里。这样外部拿到 id 后才有挂 hook 的窗口（否则最开始几个监听器会挂不上，见 `idle` 状态说明）。
+
+1. NACEB 解析 pipeline：优先用 eventAlias 里 `name` 对应的 pipelineName，否则用 input 自带的 pipelineName；两者都没有则直接抛错。
+2. 跑 `beforePushEvent` hook（可否决），再校验该 pipeline 已注册。
+3. 建 EventInstance，状态 `idle`，入队，跑 `afterPushEvent` hook。
+4. 若 push 时带了 `bypassIdle`，NACEB 内部立刻替你调一次 `start()`。
+
+而 `EventInstance.start()` 才决定去向：
+
+- 有 blockedBy（且其中存在未终局的 Event）→ `blocked`
+- 否则 → `queue`
 
 
 #### 状态
@@ -350,6 +367,11 @@ NACEB 只发以下两类事件，完整清单、字段见 [观测 → EventBus](
 - **运行时事件** `naceb:runtime:{level}:{id}`，level 是 `error` / `warning` / `log` / `message`。
 
 T 事件 payload 恒为 `undefined`，内部数据请使用在 `this` 上。`this` 是对应 Instance 的 `readonlyView`。
+
+> `readonlyView` 是**浅层**保护：它只拦根级属性的 set/delete/defineProperty。嵌套对象是裸返回的，方法调用会绑回真身。也就是说 `this.status = 'done'` 会抛 TypeError，但 `this.state.foo = 1`、`this.payload.x = 1`、以及 `this.pause()` / `this.consume()` 全都有效。
+>
+> 方法可调是**刻意保留**的（`naceb:event:done:after:*` 里直接 `this.consume()` 取结果是支持的用法），但这意味着 T 事件的观测面在工程上是「约定只读」而非「强制只读」。在 T 事件里改数据既会撞时机竞争，也不受 Proxy 保护，要介入请用 THook。
+
 运行时事件则相反，数据均通过 payload 传输。
 
 ```ts
@@ -377,13 +399,13 @@ taskHandlers 是带 `register/list/remove/get` 方法的公开注册表对象，
 - `remove(name)` — 按名移除
 - `get(name)` — 按名查找，返回 `TaskHandler | undefined`
 
-无论是注入还是register追加，都只接受TaskInstance的具体extend实现。
+无论是注入还是register追加，都只接受`TaskHandler`的具体extend实现（即 `class XxxTask extends TaskHandler` 的实例），不是TaskInstance——TaskInstance是NACEB内部按需new出来的运行时载体，外部不构造它。
 
 TaskHandler不关心事件、Pipeline、状态机、队列、资源占用等问题（这些由TaskController负责），它只关心自己的输入和输出。
 
 如果设置了busyKeys，TaskHandler会被视为BlockedTask，否则是AsyncTask。BlockedTask会占用对应Lane资源，AsyncTask不会。
 
-同时，TaskHandler也内部持有abortSignal，在编写具体的excute逻辑时可以通过this.abortSignal来判断是否被外部中止，并提前终止自己内部逻辑。
+abortSignal 由 **TaskInstance** 持有（`TaskInstance.abort = new AbortController()`，对外暴露 `get abortSignal()`）。Handler 是注册表里共享复用的无状态逻辑，不可能持有某一次执行的 AbortSignal；但因为 `execute()` 的 `this` 被绑定到本次的 TaskInstance，所以在编写具体的 execute 逻辑时照样直接写 `this.abortSignal` 来判断是否被外部中止，并提前终止自己内部逻辑。
 
 > NACEB TaskHandler的终止被设计为协商式的，也就是说，TaskHandler内部的execute逻辑必须自己判断abortSignal是否被激活，并在适当时机终止自己的逻辑。NACEB不会强制中止正在执行的TaskHandler。
 >
@@ -393,7 +415,7 @@ TaskHandler内部可以通过`this.processingResultReport(delta)`来流式上报
 
 外部可以通过`naceb.eventBusObs.listen(`naceb:runtime:message:${eventId}`, (p)=>{})`来监听中间结果。
 
-> NACEB自带的NACPAdpator会把这个中间结果转为普通的`onProgress`回调，两者是等价的。
+> NACEB自带的NACPAdaptor会把这个中间结果转为普通的`onProgress`回调，两者是等价的。
 
 ```ts
 class CollatzConjectureODDTask extends TaskHandler {
@@ -444,9 +466,9 @@ next函数内，this被指向了PipelineInstance本身，因此，可以在next�
 
 > Pipeline的被故意设计为一个机械前进器。当运行到这一步时，将上一步的输出和状态作为下一步的输入，从而决定下一步怎么走。
 >
-> Pipeline的输出被限定指导下一步使用什么taskHandler处理和输入，具体的task执行并不由Pipeline决定。
+> Pipeline的输出被限定为「下一步用哪个 TaskHandler 处理、输入是什么」，具体的task执行并不由Pipeline决定。
 >
-> 需要注意的是，PipelineHandler在执行next的时候不会校验输入的新装是否符合TaskHandler的输入要求。
+> 需要注意的是，PipelineHandler在执行next的时候不会校验注入的输入形状是否符合 TaskHandler 的输入要求。
 
 ```ts
 class CollatzConjecturePipe extends PipelineHandler {
@@ -476,10 +498,16 @@ EventAlias与两个HandlersList相反，他就是一个非常简单的别名，�
 
 由于NACEB在设计上是让Event去指定Pipeline的，但是有一部分Event上报时不会挟带管线名，因此可以用这个列表默认指定。
 
-同样允许在构造时和允许时修改绑定：
+同样允许在构造时和运行时修改绑定。注意构造器只认 `{ pipelineHandlers, taskHandlers, eventAlias }` 三个键，别名必须包在 `eventAlias` 数组里：
 
 ```ts
-const naceb = new NACEB( { eventName: 'ChatEvent', pipelineName: 'chat',     description: '普通对话' })
+const naceb = new NACEB({
+  pipelineHandlers: [new ChatPipe()],
+  taskHandlers:     [new TextCompletionTask()],
+  eventAlias: [
+    { eventName: 'ChatEvent', pipelineName: 'chat', description: '普通对话' },
+  ],
+})
 
 naceb.eventAlias.register({ eventName: 'ChatEvent', pipelineName: 'chat-v3', description: '...' })
 
@@ -516,14 +544,18 @@ Veto否决会导致本次转移失败，状态会保持在完全没有开始转�
 >
 > 因此，我们在篡改BlockedBy参数后抛出VetoT(<String>)，使得本次转移失效。在下一个tick时EventFSMController就会去检查BlockedBy。
 >
-> 警告，如果你在Hook内实现的函数发生了了UnhandledError，我们不会视为Veto，而被视为致命错误，对应层状态会直接进入failure表示介入失败。如果在Event层出现，会引发Event、Pipeline和Task的级联终止。这一刻会被阻塞直到这一层以下的内容被终止并消费干净。如果Hook错误发生在Pipeline或Task，则自己回立刻进入Failure，并在下一tick同步到上面的Layer。
+> 警告，如果你在Hook内实现的函数发生了 UnhandledError，我们不会视为Veto，而被视为致命错误，对应层状态会直接进入failure表示介入失败。如果在Event层出现，会引发Event、Pipeline和Task的级联终止。这一刻会被阻塞直到这一层以下的内容被终止并消费干净。如果Hook错误发生在Pipeline或Task，则自己会立刻进入Failure，并在下一tick同步到上面的Layer。
 > 如果这次致命错误本来就发生在转移Failure时，TFailure的所有Hook都会被禁用（不包括EventBus的Emit）。
 > 
-> Veto主要应用于Event事件，Event全部T事件都可以被Veto。Task仅可在beforeTRunning时Veto，其余T事件（done/failure/stopped）已是既定事实不可否决。Pipeline所有T事件均不可Veto。
+> Veto主要应用于Event事件。Event除终局外的T事件（blocked/queue/activating/processing/pending/paused）都可以被Veto；**Event的终局T事件（done/failure）不可否决**，与Task同理（既成事实）。Task仅可在beforeTRunning时Veto，其余T事件（done/failure/stopped）已是既定事实不可否决。Pipeline所有T事件均不可Veto。
+>
+> **为什么终局不可否决**：可Veto的前提是这个转移有**收敛条件**——hook篡改了blockedBy/scope之后，下一刻Controller重新判据就会放行或改道。但终局没有任何可篡改的条件能让它「不再是终局」：pipeline已经终局了，下一刻EventFSMController第1步仍会读到同一个终局pipeline，再次尝试转移、再次被Veto。而Veto走「虚拟moved」出口会立刻补拍，于是形成**0延迟死循环**，同时pipeline永远不会被消费。因此在终局T点抛出VetoT会被**降级为warning并照常放行**（`naceb:runtime:warning:{id}`，reason为`beforeT{Done|Failure}-veto-ignored-terminal`），转移正常完成。
+>
+> 如果你的意图是「不想让这个Event就这么结束」，正确做法不是在终局Veto，而是在Pipeline的`next()`里不返回`$terminal`，或者在下层task的`beforeTRunning`处反对转移。
 >
 > 此外，如果一个转移被Veto，它的副作用不会被激活，但是仍会被视为一次虚拟的moved，从而快速激活下一刻。
 
-需要注意的是，所有的回调函数内部`this`都是被刻意绑定到对应Instance上。例如，Event.afterTDone(fucntion(){})中，内部的匿名函数this就是触发本次Hook的EventInstance。
+需要注意的是，所有的回调函数内部`this`都是被刻意绑定到对应Instance上。例如，Event.afterTDone(function(){})中，内部的匿名函数this就是触发本次Hook的EventInstance。
 
 不同于EventBus，绑定在Hook上的this是原生的、可以直接修改字段的。
 
@@ -553,9 +585,9 @@ Veto否决会导致本次转移失败，状态会保持在完全没有开始转�
 <tr><td class="af">afterTPending</td><td>观测已进入Async任务执行态（即等待态）</td></tr>
 <tr><td class="st" rowspan="2">Paused</td><td rowspan="2">被Event.pause暂停</td><td class="bf">beforeTPaused</td><td>Veto可以阻止暂停</td></tr>
 <tr><td class="af">afterTPaused</td><td>观测已进入暂停态</td></tr>
-<tr><td class="st" rowspan="2">Done</td><td rowspan="2">事件完成</td><td class="bf">beforeTDone</td><td>-</td></tr>
+<tr><td class="st" rowspan="2">Done</td><td rowspan="2">事件完成</td><td class="bf">beforeTDone</td><td>可读 pipeline 终局结果（此刻 pipeline 尚未被消费）；<b>不可 Veto</b>，抛 VetoT 会被降级 warning 并放行</td></tr>
 <tr><td class="af">afterTDone</td><td><b>读取/消费结果的最后回调</b>（consumeEvent 前）</td></tr>
-<tr><td class="st" rowspan="2">Failure</td><td rowspan="2">事件失败</td><td class="bf">beforeTFailure</td><td>-</td></tr>
+<tr><td class="st" rowspan="2">Failure</td><td rowspan="2">事件失败</td><td class="bf">beforeTFailure</td><td>同上，<b>不可 Veto</b></td></tr>
 <tr><td class="af">afterTFailure</td><td><b>读取/消费错误信息的最后回调</b>（consumeEvent 前）</td></tr>
 </table>
 
@@ -563,12 +595,26 @@ Veto否决会导致本次转移失败，状态会保持在完全没有开始转�
 >
 > 如果你尝试在beforeTBlocked/beforeTQueue时Veto，Event则会回退Idle状态，这种情况下你需要手动start才能重新启动。
 
+> **终局的两阶段提交（原子性保证）**
+>
+> Event收终局时，「消费下层Pipeline」是作为转移副作用执行的，插在 beforeT{Done,Failure} 之后、改status之前：
+>
+> ```
+> 1. 读到 Pipeline 已终局（EventFSMController.nextTick 第 1 步）
+> 2. emit T 事件 + 跑 Event.beforeT{Done|Failure} hook   ← Pipeline 还活着，可读
+> 3. 消费 Pipeline（取 final → 落到 event.final，销毁 Pipeline）
+> 4. 改 Event.status = done/failure
+> 5. 跑 Event.afterT{Done|Failure} hook                  ← 可读 event.final
+> ```
+>
+> 因此绝不会出现「Pipeline 已被消费但 Event 还没终局」的双份所有权错位。终局既然不可Veto，第2步也就不存在中途放弃的分支——这正是终局不可否决的另一半理由。
+
 
 #### PipelineTHook
 
 本Hook挂载在`PipelineInstance`。
 
-> 同理，只要能获得PipelineInstance都可以挂在上。
+> 同理，只要能获得PipelineInstance都可以挂上去。
 
 <table class="hooks">
 <tr><th>状态</th><th>含义</th><th>前缀</th><th>一般作用</th></tr>
@@ -697,7 +743,18 @@ alertTick是激活刻的唯一入口。
 
 基础时钟，每隔50ms激活一次alertTick，确保NACEB在没有外部激活的情况下仍然以最低频率运行。
 
-当EventQueue内部没有需要继续照顾的idle时，ensureClock会暂停工作，直到下一次外部事件触发（pushEvent或start/stop）
+时钟的存续判据是「队列里还有没有需要照顾的 Event」（`hasLive()`）。注意 **idle 与 paused 恰恰是不撑时钟的**——它们是 tick 豁免态，nextTick 一律绕过，分别等外部 `start()` 和 `resume()`，空转扫描没有意义。具体：
+
+| Event 状态 | 撑不撑时钟 | 说明 |
+|---|---|---|
+| idle / paused | **不撑** | tick 豁免态，等外部 `start()` / `resume()`；这两个方法内部会重新 `ensureClock` 拉起表 |
+| blocked / queue / activating / processing / pending | 撑 | 可推进，需要 tick |
+| done / failure 且 **未**带 bypassConsume | 撑 | 等外部 consume，实现上仍持续撑表 |
+| done / failure 且带 bypassConsume | 不撑 | perTick 第 4 步会自动消费掉它 |
+
+当队列里一个撑表的 Event 都没有时，ensureClock 清掉定时器停止工作，直到下一次 `pushEvent` / `start()` / `resume()` 把它拉起来。
+
+> 已知取舍：一个终局但**没人 consume** 的普通 Event 会让 50ms 时钟一直转下去（它算 live）。这是刻意选择——NACEB 不替外部决定何时消费，宁可空转也不自行清除。如果不需要外部消费，push 时带 `bypassConsume` 让它自动回收。
 
 > Q：这是否意味着每个Event同步间隔要超过50ms？
 >
@@ -710,8 +767,6 @@ alertTick是激活刻的唯一入口。
 快进刻确保了当队列里真的有任务时，NACEB会以最快的速度推进状态机。
 
 
-
-
 ### 备注
 
 为什么不用callback、内置的EventBus事件通知来完成状态同步，而是pertick：防止状态更新混乱、来源未知，在并发时防止打架。而且心智模型清晰，对于复杂任务20ticks/s速度足够。
@@ -722,3 +777,6 @@ perTick激活时，每个Controller只能控制自己和下层的内容，永远
 
 所有叶子节点如果被执行，EventController将在本tick下return。Pipeline和Task不会限制。
 
+NACEB 有意把 Hook 设计成同步控制面，并把 VetoT 设计成“修改条件后取消本次转移、下一 Tick 重新求值”的机制。它们牺牲了对错误 Hook 的容错性，换取了可预测的介入顺序和无竞态的下层 Hook 链式挂载。这是一个成立的设计取舍，不是实现疏漏。
+
+所以，Hook作者应当注意，在钩子中运行的函数请确保是幕等的，钩子不会自己取消掉自己。也不要在Hook中写高耗时函数，因为Hook激活时会阻塞tick推进。若真的有这种情况，建议使用EventBus监听。

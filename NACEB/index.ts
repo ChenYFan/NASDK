@@ -1,12 +1,12 @@
 /**
  * NACEB public API barrel.
  *
- * Exposes the assembly (Naceb), authoring bases (PipelineHandler, TaskHandler), the public contracts and
+ * Exposes the assembly (NACEB), authoring bases (PipelineHandler, TaskHandler), the public contracts and
  * status/const types, plus the instance classes and hook interfaces consumers observe. Internal
  * machinery (the FSMController classes, private helpers) is intentionally not re-exported.
  */
 
-export { Naceb } from './NACEB.ts'
+export { NACEB } from './NACEB.ts'
 
 export {
   // authoring bases
@@ -21,7 +21,7 @@ export type {
   // contracts
   PipelineStep,
   EventInterface, PushOpts, SubEventSpec,
-  NacebHooks, EventHooks,
+  NACEBHooks, EventHooks,
   // event alias (lookup table) + NACP declaration item
   EventAlias, Event,
 } from './types.ts'

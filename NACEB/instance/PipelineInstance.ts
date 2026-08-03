@@ -115,14 +115,20 @@ export class PipelineInstance {
     catch (err: any) { await this._transition('failure', [() => { this.result.final = { error: err?.message ?? String(err) } }]) }
   }
 
-  async _pause(): Promise<void> {
+  /** 暂停链的中段。**返回 boolean：整段成功 = true；本层没转成 paused（hook bug 落 failure）= false**。
+   *  返回 false 时**不动下层 task**——上层 Event.pause 读这个 bool 决定回滚，避免「Event 停在 paused 但
+   *  pipeline 已 failure」的层间错位（那种错位会让 pause() 谎报成功）。 */
+  async _pause(): Promise<boolean> {
     const t = this.getTask()
-    await this._transition('paused')
+    if (!(await this._transition('paused'))) return false
     if (t) await t._stop()
+    return true
   }
-  async _resume(): Promise<void> {
+  /** 恢复链的中段。**返回 boolean：整段成功 = true；本层没转成 running = false**。
+   *  task._restart 先跑（它断言自己是 stopped，不满足就抛），本层再转 running。 */
+  async _resume(): Promise<boolean> {
     const t = this.getTask()
     if (t) await t._restart()
-    await this._transition('running')
+    return await this._transition('running')
   }
 }

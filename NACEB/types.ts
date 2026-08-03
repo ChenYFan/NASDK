@@ -54,8 +54,8 @@ export interface SubEventSpec {
   payload: unknown
 }
 
-/** Naceb reference handed to builtin privileged handlers at assembly time (ordinary user handlers never get it). */
-export interface NacebRef {
+/** NACEB reference handed to builtin privileged handlers at assembly time (ordinary user handlers never get it). */
+export interface NACEBRef {
   pushEvent(e: Omit<EventInterface, 'id' | 'name' | 'pipelineName'> & { id?: string; name?: string; pipelineName?: string }, opts?: PushOpts): string
   getEvent(id: string): EventInstance | null
   consumeEvent(id: string): unknown
@@ -90,8 +90,8 @@ export interface EventInterface {
   parentId?: string        // runtime-stamped by builtin $fire4/$wait4SubEvent; not user-written
 }
 
-/** Naceb reference handed to builtin privileged handlers at assembly time (ordinary user handlers never get it). */
-export interface NacebRef {
+/** NACEB reference handed to builtin privileged handlers at assembly time (ordinary user handlers never get it). */
+export interface NACEBRef {
   pushEvent(e: Omit<EventInterface, 'id' | 'name' | 'pipelineName'> & { id?: string; name?: string; pipelineName?: string }, opts?: PushOpts): string
   getEvent(id: string): EventInstance | null
   consumeEvent(id: string): unknown
@@ -121,7 +121,7 @@ export interface PushOpts {
 }
 
 /** Assembly-level hooks (push entry point, not transitions). */
-export interface NacebHooks {
+export interface NACEBHooks {
   beforePushEvent?(e: EventInterface): void | { reject?: true }
   afterPushEvent?(e: EventInterface): void
 }
@@ -201,7 +201,7 @@ export interface RuntimePayload {
   msg?: string
   opt?: Record<string, unknown>
 }
-/** Injected by Naceb at assembly: emits `naceb:runtime:{level}:{id}` on the internal EventBus. */
+/** Injected by NACEB at assembly: emits `naceb:runtime:{level}:{id}` on the internal EventBus. */
 export type RuntimeEmit = (level: RuntimeLevel, id: string, payload: RuntimePayload) => void
 
 /** THookHandler：触发一个 T 事件 = emit T 事件（readonlyView 骑 this）+ 顺序跑该状态的 hook 列表。
@@ -209,16 +209,18 @@ export type RuntimeEmit = (level: RuntimeLevel, id: string, payload: RuntimePayl
 export type THookHandler = (layer: string, state: string, phase: string, id: string, obj: any, hooks?: HookFn<any>[]) => Promise<void>
 
 /**
- * NacebPrivateRef — Naceb 把自己的**私有能力**打包成一个盒子，装配时注入给三个 Controller（同一引用）。
- * Controller 只持 `.naceb`（Naceb 的 public 成员，如 taskHandlers/eventBus）+ `.ref`（本盒，私有能力）。
+ * NACEBPrivateRef — NACEB 把自己的**私有能力**打包成一个盒子，装配时注入给三个 Controller（同一引用）。
+ * Controller 只持 `.naceb`（NACEB 的 public 成员，如 taskHandlers/eventBus）+ `.ref`（本盒，私有能力）。
  * 分界无歧义:naceb 的 private 成员通过 this.naceb 访问不到，一律走 this.ref。盒内成员不带下划线。
  * 三个 controller 互引也在盒里（pipeline/event 有构造环，用 lazy getter）。
  */
-export interface NacebPrivateRef {
+export interface NACEBPrivateRef {
   THookHandler: THookHandler
   emit: RuntimeEmit
   emitMessage: (t: any, chunk: unknown) => void
   alertTick: (from: string) => void
+  /** 拉起 20Hz 基础时钟（幂等）。idle/paused 不撑时钟，故 start()/resume() 离开豁免态时必须调它重启。 */
+  ensureClock: () => void
   forceCleanEventUnderLayer: (eventId: string) => Promise<void>
   taskController: import('./controller/TaskFSMController.ts').TaskFSMController
   pipelineController: () => import('./controller/PipelineFSMController.ts').PipelineFSMController

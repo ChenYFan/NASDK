@@ -15,7 +15,7 @@
 import type { Processor, ProcessorSpec, ProcessorHooks } from '../types.ts'
 import { NASDKError } from '../types.ts'
 import type { ReadonlyBus } from '../EventBus.ts'
-import type { Naceb } from './NACEB.ts'
+import type { NACEB } from './NACEB.ts'
 
 /** whyNotOk string: NASDKError carries a machine code → `code: message`; a plain Error → its message. */
 function whyNotOk(err: any): string {
@@ -24,9 +24,9 @@ function whyNotOk(err: any): string {
 }
 
 export class NACPAdaptor implements Processor {
-  private naceb: Naceb
+  private naceb: NACEB
   private obs: ReadonlyBus
-  constructor(naceb: Naceb) { this.naceb = naceb; this.obs = naceb.eventBusObs }
+  constructor(naceb: NACEB) { this.naceb = naceb; this.obs = naceb.eventBusObs }
 
   /** Declaration items — delegate to getAllEvents(). */
   list() { return this.naceb.getAllEvents() }
@@ -42,18 +42,17 @@ export class NACPAdaptor implements Processor {
       hooks.onResponse(undefined, false, whyNotOk(err))
       return ''
     }
-    // process stream: store cb ref so we can off it on terminal. (runtime message event; chunk rides opt)
+    // process stream: keep the subscription id so we can off it on terminal. (runtime message event; chunk rides opt)
     const processKey = `naceb:runtime:message:${eventId}`
-    const processCb = (m: any) => hooks.onProcess(m?.opt?.chunk)
-    this.obs.listen(processKey, processCb)
+    const processSub = this.obs.listen(processKey, (m: any) => hooks.onProcess(m?.opt?.chunk))
     // terminal: attach BEFORE start so the done/failure signal can't be missed. consume takes the final result.
     const ev = this.naceb.getEvent(eventId)!
     ev.afterTDone(() => {
-      this.obs.off(processCb)
+      this.obs.off(processSub)
       hooks.onResponse(this.naceb.consumeEvent(eventId), true)
     })
     ev.afterTFailure(() => {
-      this.obs.off(processCb)
+      this.obs.off(processSub)
       const final = this.naceb.consumeEvent(eventId) as any
       hooks.onResponse(final, false, final?.error ?? 'event failure')
     })

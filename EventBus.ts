@@ -26,7 +26,9 @@
  * can listen but never forge events. Internally the holder uses the full bus directly.
  */
 
-type Sub = { cb: (p: any) => unknown; once: boolean }
+import { uid } from './utils/id.ts'
+
+type Sub = { id: string; cb: (p: any) => unknown; once: boolean }
 type Shape = { len: number; mask: boolean[] }   // mask[i] = true ⟺ that segment is '*'
 
 /**
@@ -52,12 +54,19 @@ export function readonlyView<T extends object>(target: T): T {
 
 /** Read-only observation view of an EventBus: subscribe/unsubscribe only, no emit. A holder that owns a
  *  bus (news it, emits on it internally) exposes this to the outside so observers can listen but never
- *  forge events. `bus.readonly` returns one; holders re-export it (e.g. Naceb.eventBusObs). */
+ *  forge events. `bus.readonly` returns one; holders re-export it (e.g. NACEB.eventBusObs). */
 export interface ReadonlyBus {
-  listen(key: string, cb: (p: any) => void): void
-  listenOnce(key: string, cb: (p: any) => void): void
-  asyncListenOnce(key: string): Promise<any>
-  off(cb: (p: any) => unknown): void
+  /** Subscribe; returns the subscription id to pass to off(). The same cb may be registered many times —
+   *  each call is an independent subscription with its own id. */
+  listen(key: string, cb: (p: any) => void): string
+  /** Subscribe for one dispatch, then auto-remove. Returns an id too, for cancelling before it fires. */
+  listenOnce(key: string, cb: (p: any) => void): string
+  /** await one event. With `cb`, its `this` is the emit-side thisArg (readonlyView for T-events, the bus
+   *  otherwise) and its return value resolves the promise; a throw/rejection rejects it. Without `cb`,
+   *  resolves with the payload. */
+  asyncListenOnce<R = any>(key: string, cb?: (this: any, p: any) => R | Promise<R>): Promise<R>
+  /** Cancel by subscription id (the value listen/listenOnce returned). Returns true if one was removed. */
+  off(id: string): boolean
 }
 
 export class EventBus {
@@ -66,7 +75,9 @@ export class EventBus {
   // Distinct wildcard shapes seen so far; emit iterates only these.
   private shapes: Shape[] = []
   private maxListeners = 50
-  onError?: (key: string, err: unknown) => void
+  /** listener-error sink. Defaults to a no-op; a holder should override it (e.g. re-emit as its own
+   *  runtime:error event). Also used for the maxListeners warning. */
+  onError: (key: string, err: unknown) => void = () => {}
 
   private shapeOf(pattern: string[]): Shape {
     return { len: pattern.length, mask: pattern.map(seg => seg === '*') }
@@ -89,26 +100,58 @@ export class EventBus {
       this.shapes.push(shape)
   }
 
-  private add(key: string, cb: (p: any) => void, once: boolean) {
+  private add(key: string, cb: (p: any) => void, once: boolean): string {
     const pattern = key.split(':')
     const shape = this.shapeOf(pattern)
     this.registerShape(shape)
     const bk = this.keyFromPattern(pattern, shape)
     const arr = this.buckets.get(bk) ?? this.buckets.set(bk, []).get(bk)!
-    arr.push({ cb, once })
+    const id = uid('sub')
+    arr.push({ id, cb, once })
     if (arr.length > this.maxListeners)
-      this.onError?.(key, new Error(`EventBus: ${arr.length} listeners on '${key}' — possible leak`))
+      this.onError(key, new Error(`EventBus: ${arr.length} listeners on '${key}' — possible leak`))
+    return id
   }
 
-  listen(key: string, cb: (p: any) => void) { this.add(key, cb, false) }
-  listenOnce(key: string, cb: (p: any) => void) { this.add(key, cb, true) }
-  asyncListenOnce(key: string): Promise<any> { return new Promise(resolve => this.listenOnce(key, resolve)) }
+  /** Subscribe. Returns the subscription id — keep it to `off()` later. Registering the same cb twice
+   *  yields two independent subscriptions (two ids), and both fire. */
+  listen(key: string, cb: (p: any) => void): string { return this.add(key, cb, false) }
+  /** Subscribe for exactly one dispatch, then auto-remove. The id is still returned so the subscription
+   *  can be cancelled before it ever fires. */
+  listenOnce(key: string, cb: (p: any) => void): string { return this.add(key, cb, true) }
+  /**
+   * Await a single event. The optional `cb` runs with the SAME `this` as any other listener (the emit-side
+   * thisArg — a readonlyView for T-events, this bus otherwise), and **its return value resolves the
+   * promise** — so `function(){ return this.status }` works. If `cb` throws (or returns a rejecting
+   * promise) the returned promise REJECTS: unlike a fan-out listener, an awaited one has a caller to
+   * report to, so the error goes to that caller instead of being swallowed into onError.
+   * Without `cb`, resolves with the payload (`this` unreachable — pass a `function` cb to read it).
+   */
+  asyncListenOnce<R = any>(key: string, cb?: (this: any, p: any) => R | Promise<R>): Promise<R> {
+    return new Promise<R>((resolve, reject) => {
+      this.listenOnce(key, function (this: any, payload: any) {
+        if (!cb) return resolve(payload as R)
+        // The wrapper absorbs the error (turning it into reject), so emit()'s isolation never sees it:
+        // an awaited listener has a caller to report to, and that caller is the single authoritative sink.
+        try {
+          const r = cb.call(this, payload)
+          if (r && typeof (r as any).then === 'function') {
+            return (r as Promise<R>).then(resolve, reject)
+          }
+          resolve(r as R)
+        } catch (e) { reject(e) }
+      })
+    })
+  }
 
-  off(cb: (p: any) => unknown) {
+  /** Cancel a subscription by the id `listen`/`listenOnce` returned. Returns whether one was removed
+   *  (false = already fired-and-removed, or already off'd, or never existed). */
+  off(id: string): boolean {
     for (const arr of this.buckets.values()) {
-      const i = arr.findIndex(s => s.cb === cb)
-      if (i >= 0) arr.splice(i, 1)
+      const i = arr.findIndex(s => s.id === id)
+      if (i >= 0) { arr.splice(i, 1); return true }
     }
+    return false
   }
 
   /** Read-only view of this bus (subscribe/unsubscribe only, no emit). Holders expose this to observers
@@ -117,18 +160,17 @@ export class EventBus {
     return {
       listen:          (k, cb) => this.listen(k, cb),
       listenOnce:      (k, cb) => this.listenOnce(k, cb),
-      asyncListenOnce: (k)     => this.asyncListenOnce(k),
-      off:             (cb)    => this.off(cb),
+      asyncListenOnce: (k, cb) => this.asyncListenOnce(k, cb),
+      off:             (id)    => this.off(id),
     }
   }
 
   /**
-   * Fan out to matching observers. `thisArg` (optional) becomes the observer callback's `this` —
-   * for NACEB/NACAB T-events (transitions) this is the readonlyView of the instance, so an observer
-   * written as `function(){ this.status }` reads state off `this` (payload then defaults to空),
-   * symmetric with the hook side's `fn.call(instance)`. Omitted (every non-transition emit) ⟹ bare
-   * `cb(payload)`, `this` = undefined — behavior unchanged. Errors stay isolated to onError either way
-   * (observers are read-only: they can inspect/emit-observe, never veto or feed back into the FSM).
+   * Fan out to matching observers. `thisArg` (optional) becomes the observer callback's `this`.
+   * When omitted, `this` defaults to the EventBus instance itself (convention with Node EventEmitter).
+   * NACEB/NACAB T-events pass `readonlyView(instance)` to override — the observer written as
+   * `function(){ this.status }` reads state off the instance, symmetric with hook's `fn.call(instance)`.
+   * Runtime events (no thisArg passed) default to EventBus as `this`. Errors stay isolated to onError.
    */
   emit(key: string, payload: any, thisArg?: any) {
     const parts = key.split(':')
@@ -143,9 +185,9 @@ export class EventBus {
     // Read-only observation: listener errors are isolated, never fed back to the state machine (P0-2).
     for (const { sub } of hit) {
       try {
-        const r = sub.cb.call(thisArg, payload)
-        if (r && typeof (r as any).then === 'function') (r as Promise<any>).catch(e => this.onError?.(key, e))
-      } catch (e) { this.onError?.(key, e) }
+        const r = sub.cb.call(thisArg !== undefined ? thisArg : this, payload)
+        if (r && typeof (r as any).then === 'function') (r as Promise<any>).catch(e => this.onError(key, e))
+      } catch (e) { this.onError(key, e) }
     }
   }
 }

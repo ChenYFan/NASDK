@@ -1,7 +1,7 @@
 /**
  * NACEB — Nyirusu Application Control Event Bus. The assembly.
  *
- * Three FSMControllers sit side by side under Naceb, "asking" each other via lazy getters that Naceb
+ * Three FSMControllers sit side by side under NACEB, "asking" each other via lazy getters that NACEB
  * injects. alertTick self-locks (ticking flag held across awaits) and each tick awaits the three
  * controller.nextTick() in order (task → pipeline → event). Queues hold full instance objects across
  * all three layers: the object IS the state IS the capability.
@@ -20,8 +20,8 @@ import type { ReadonlyBus } from '../EventBus.ts'
 import { uid } from '../utils/id.ts'
 import { TaskHandler } from './types.ts'
 import type {
-  PipelineHandler, NacebHooks, EventInterface, PushOpts, NacebRef, EventAlias, Event, RuntimeEmit,
-  NacebPrivateRef, THookHandler as THookHandlerFn,
+  PipelineHandler, NACEBHooks, EventInterface, PushOpts, NACEBRef, EventAlias, Event, RuntimeEmit,
+  NACEBPrivateRef, THookHandler as THookHandlerFn,
 } from './types.ts'
 import { TaskFSMController, builtinHandlers } from './controller/TaskFSMController.ts'
 import { nacebInbound, nacebInternal } from './errors.ts'
@@ -31,11 +31,11 @@ import { EventFSMController } from './controller/EventFSMController.ts'
 import type { EventInstance } from './controller/EventFSMController.ts'
 import { NACPAdaptor } from './NACPAdaptor.ts'
 
-export class Naceb {
+export class NACEB {
   private taskController: TaskFSMController
   private pipelineController: PipelineFSMController
   private eventController: EventFSMController
-  private hooks: NacebHooks = {}
+  private hooks: NACEBHooks = {}
   readonly eventBus = new EventBus()
   readonly pipelineHandlers = (() => {
     const _map = new Map<string, PipelineHandler>()
@@ -57,7 +57,7 @@ export class Naceb {
   private clock: ReturnType<typeof setInterval> | null = null
   private ticking = false
   private _emit: RuntimeEmit
-  private ref!: NacebPrivateRef   // 私有能力盒，构造内填充后注入三个 Controller
+  private ref!: NACEBPrivateRef   // 私有能力盒，构造内填充后注入三个 Controller
   private _nacpAdaptor: NACPAdaptor | null = null
 
   constructor(opts: {
@@ -88,7 +88,7 @@ export class Naceb {
       }
     }
 
-    // ref：Naceb 私有能力打包盒，注入给三个 Controller（同一引用）。controller 互引用闭包/惰性读 this，破构造环。
+    // ref：NACEB 私有能力打包盒，注入给三个 Controller（同一引用）。controller 互引用闭包/惰性读 this，破构造环。
     this.ref = {
       THookHandler,
       emit: this._emit,
@@ -96,6 +96,7 @@ export class Naceb {
         layer: 'task', id: t.eventId, opt: { taskId: t.id, eventId: t.eventId, pipelineId: t.pipeline.id, chunk },
       }),
       alertTick: (from: string) => this.alertTick(from),
+      ensureClock: () => this.ensureClock(),
       forceCleanEventUnderLayer: (eventId: string) => this.forceCleanEventUnderLayer(eventId),
       taskController: undefined as any,               // 下面 new 出来后回填
       pipelineController: () => this.pipelineController,
@@ -107,7 +108,7 @@ export class Naceb {
     this.eventController = new EventFSMController(this, this.ref)
     this.ref.taskController = this.taskController      // 回填（Task 无构造环，直接持引用）
 
-    const ref: NacebRef = {
+    const ref: NACEBRef = {
       pushEvent: (e, o) => this.pushEvent(e, o),
       getEvent: (id) => this.getEvent(id),
       consumeEvent: (id) => this.consumeEvent(id),
@@ -118,7 +119,7 @@ export class Naceb {
   registerPipelineHandler(h: PipelineHandler) { this.pipelineHandlers.register(h) }
   registerTaskHandler(h: TaskHandler) { this.taskHandlers.register(h) }
   registerEventAlias(alias: EventAlias) { this.eventAlias.register(alias) }
-  on<K extends keyof NacebHooks>(hook: K, fn: NonNullable<NacebHooks[K]>) { (this.hooks as any)[hook] = fn }
+  on<K extends keyof NACEBHooks>(hook: K, fn: NonNullable<NACEBHooks[K]>) { (this.hooks as any)[hook] = fn }
 
   /** Read-only observation view of the internal EventBus (subscribe/unsubscribe only, no emit).
    *  Internally NACEB uses this.eventBus directly; external consumers get this view. */

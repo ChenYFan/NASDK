@@ -6,8 +6,8 @@
  * controller returns after a single action per tick (rate limit); pipeline/task run unthrottled beneath it.
  */
 
-import type { EventStatus, EventHooks, EventInterface, NacebPrivateRef } from '../types.ts'
-import type { Naceb } from '../NACEB.ts'
+import type { EventStatus, EventHooks, EventInterface, NACEBPrivateRef } from '../types.ts'
+import type { NACEB } from '../NACEB.ts'
 import type { PipelineFSMController } from './PipelineFSMController.ts'
 import { EventInstance } from '../instance/EventInstance.ts'
 export { EventInstance } from '../instance/EventInstance.ts'
@@ -17,10 +17,10 @@ export { EventInstance } from '../instance/EventInstance.ts'
 // ============================================================
 export class EventFSMController {
   queue: EventInstance[] = []
-  naceb: Naceb
-  ref: NacebPrivateRef
+  naceb: NACEB
+  ref: NACEBPrivateRef
 
-  constructor(naceb: Naceb, ref: NacebPrivateRef) {
+  constructor(naceb: NACEB, ref: NACEBPrivateRef) {
     this.naceb = naceb; this.ref = ref
   }
 
@@ -46,43 +46,36 @@ export class EventFSMController {
   }
 
   /** Clock liveness: keep running while any event still needs attention —
-   *  = non-terminal, OR terminal but !bypassConsume (awaiting external consume).
-   *  A terminal + bypassConsume event is not live (discard-on-terminal; perTick auto-consumes it). */
+   *  idle / paused 是 **tick 豁免态**（分别等外部 start() 和 resume()，nextTick 一律绕过），故它们**不撑时钟**：
+   *  只有 idle/paused 的队列会直接停表，由 start()/resume() 里的 ensureClock 重新拉起。
+   *  其余：非终局 = live；终局但 !bypassConsume 也 live（等外部 consume）。
+   *  终局 + bypassConsume 不 live（discard-on-terminal；perTick 会自动消费掉它）。 */
   hasLive(): boolean {
     return this.queue.some(e => {
+      if (e.status === 'idle' || e.status === 'paused') return false
       const terminal = e.status === 'done' || e.status === 'failure'
       return !terminal || !e.bypassConsume
     })
   }
 
-  /** nextTick — only the event controller returns after a single action. Order 3.1→3.4, ignoring idle.
+  /** nextTick — only the event controller returns after a single action. Order 1→4, ignoring idle/paused.
    *  错误处理全内建进 EventInstance._transition（veto→留原态、bug→forceCleanEventUnderLayer+落 failure），
-   *  故这里调用点干净：`await e._transition(...)` 后直接 return true（这拍有动作，走 self 补拍/下拍重试）。 */
+   *  故这里调用点干净：`await e._transition(...)` 后直接 return true（这拍有动作，走 self 补拍/下拍重试）。
+   *  **idle / paused 是 tick 豁免态**：idle 等外部 start()，paused 等外部 resume()，perTick 一律不碰。
+   *  pause/resume 链是全有或全无的（下层失败则上层回滚），所以不存在「event paused 但 pipeline 已终局」的
+   *  错位需要 tick 兜底。done/failure 只在第 4 步做 bypassConsume 回收。 */
   async nextTick(): Promise<boolean> {
     const P = this.ref.pipelineController()
-    // 3.1 processing/pending/paused: pipeline done/failure → terminal; paused is driven only by Event.pause/resume (perTick leaves it); else align by task kind.
+    // 1 processing/pending/activating: 同步 pipeline 状态到 event（终局→收终局；无 task→不动；否则按 task 类型对齐）。
     for (const e of this.queue) {
-      if (e.status !== 'processing' && e.status !== 'pending' && e.status !== 'paused') continue
+      if (e.status !== 'processing' && e.status !== 'pending' && e.status !== 'activating') continue
       const ps = P.getStatus(e.id)
       if (ps === 'done' || ps === 'failure') { await this._terminate(e, ps, P); return true }
-      if (e.status === 'paused') continue   // paused is external will; only Event.resume leaves it, perTick does not touch it
       const kind = P.getCurrentTaskKind(e.id)
       const want: EventStatus | null = kind === 'blocked' ? 'processing' : kind === 'async' ? 'pending' : null
       if (want && want !== e.status) { await e._transition(want); return true }
     }
-    // 3.2 activating: pipeline 已终局（首步 next 就抛，一个 task 都没派出）→ 直接收终局；
-    //     否则抓当前 task 的类型来更新自己；pipeline 还 pending（首步未派）则不动。
-    for (const e of this.queue) {
-      if (e.status !== 'activating') continue
-      const ps = P.getStatus(e.id)
-      if (ps === 'done' || ps === 'failure') { await this._terminate(e, ps, P); return true }
-      const kind = P.getCurrentTaskKind(e.id)
-      if (kind === null) continue
-      const want: EventStatus = kind === 'blocked' ? 'processing' : 'pending'
-      await e._transition(want)
-      return true
-    }
-    // 3.3 queue: same-scope unoccupied → transition to activating; pipeline 在 transition 的 func 里建（beforeTActivating
+    // 2 queue: same-scope unoccupied → transition to activating; pipeline 在 transition 的 func 里建（beforeTActivating
     //   veto → 什么都没建、event 留 queue；hook bug → _transition 内崩溃链落 failure）。都算这拍有动作 → return true。
     for (const e of this.queue) {
       if (e.status !== 'queue') continue
@@ -90,7 +83,7 @@ export class EventFSMController {
       await e._transition('activating', [() => { P.activate(e) }])
       return true
     }
-    // 3.4 blocked: all blockedBy done/absent → queue.
+    // 3 blocked: all blockedBy done/failure/absent → queue.
     for (const e of this.queue) {
       if (e.status !== 'blocked') continue
       const ok = (e.blockedBy ?? []).every(id => { const s = this.getStatus(id); return s === null || s === 'done' || s === 'failure' })
@@ -98,8 +91,8 @@ export class EventFSMController {
       await e._transition('queue')
       return true
     }
-    // 3.5 reclaim: terminal (done/failure) + bypassConsume events auto-consume directly (does not spend the single-action budget, clears all in one pass).
-    //   afterTDone/afterTFailure already ran in 3.1's _transition (wait4 already got the child result), so clearing here is safe.
+    // 4 reclaim: terminal (done/failure) + bypassConsume events auto-consume directly (does not spend the single-action budget, clears all in one pass).
+    //   afterTDone/afterTFailure already ran in step 1's _transition (wait4 already got the child result), so clearing here is safe.
     for (const e of [...this.queue])
       if ((e.status === 'done' || e.status === 'failure') && e.bypassConsume) this.consume(e.id)
     return false
