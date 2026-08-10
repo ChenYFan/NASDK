@@ -19,7 +19,12 @@ export type {
   RegisterMessage, UnregisterMessage, SubscribeMessage, UnsubscribeMessage,
   NotifyMessage, RequestMessage, ResponseMessage,
   // meta tree
-  BaseMeta, RegisterMeta, RequestMeta, ResponseMeta, NotifyMeta, SubscribeMeta, UnsubscribeMeta,
+  BaseMeta, RegisterMeta, UnregisterMeta, RequestMeta, ResponseMeta, NotifyMeta, SubscribeMeta, UnsubscribeMeta,
+  // payload: every XxxPayload inherits BasePayload; the response family nests under ResponsePayload.
+  // ResponsePayloadUnion is what ResponseMessage.payload actually is (adds UnknownPayload, for a request's answer).
+  BasePayload, ResponsePayload, ResponsePayloadUnion, UnknownPayload,
+  RegisterPayload, UnregisterPayload, SubscribePayload, UnsubscribePayload,
+  RegisterResponsePayload, UnregisterResponsePayload, SubscribeResponsePayload, UnsubscribeResponsePayload,
   RequestKind,
   // declaration (the skeleton NACP defines; concrete names/semantics belong to NAISDK)
   Event, Ability, EventList, AbilitiesList, Declaration,
@@ -39,9 +44,9 @@ export {
 
 export type {
   InboundPayload, OutboundPayload,
-  NappOnlinePayload, NappOfflinePayload,
-  RouteForwardedPayload, RouteDroppedPayload,
-  ErrorRegisterPayload, ErrorMsgPayload,
+  NappSuccessPayload,
+  GatewaySuccessPayload, GatewayErrorPayload, GatewayWarningPayload,
+  RegisterErrorPayload, ErrorMsgPayload,
   EmitContext,
 } from './events.ts'
 

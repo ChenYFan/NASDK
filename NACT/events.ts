@@ -5,7 +5,13 @@
  *   nact:peer:{action}   — physical connect / disconnect / error   payload { peerId } (+ reason on error)
  *
  * Physical connect ≠ logical online: nact:peer:connect means bytes can flow, the register handshake has not
- * happened yet (the peer's appId is still unknown). Logical online is nacp:internal:napp:online.
+ * happened yet (the peer's appId is still unknown). Logical binding is nacp:internal:napp:success.
+ *
+ * ERROR IS FOLLOWED BY DISCONNECT — the two are not alternatives. `error` says why, `disconnect` says gone.
+ * A fault forces the connection down, and a forced drop reaches 'close' → `gone` like any other ending, so
+ * the row leaves the table and the departure is announced there. This matters because nact:peer:disconnect is
+ * the ONLY trigger for NACP clearing its appId, subscriptions, and waiters: an error that did not end in a
+ * disconnect would leave NACP believing a dead peer is still live.
  */
 
 import type { NACTPeerId } from './types.ts'
@@ -21,6 +27,7 @@ export const NACTEvent = {
 export type PeerErrorReason =
   | 'frame-too-large' | 'frame-too-small' | 'decode-failed'
   | 'reassembly-timeout' | 'fragment-out-of-bounds' | 'overlapping-fragment'
+  | 'heartbeat-timeout'   // a ping's pong was still outstanding when the next ping came due (ws only; tcp/unix rely on OS keepalive)
   | 'framer-error'
   | (string & {})   // open set
 

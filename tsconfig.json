@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+
+    // The source imports siblings with an explicit `.ts` extension (`from './NApp.ts'`), which is what lets
+    // `node --experimental-strip-types` run this tree with no build step at all. Both flags below exist to
+    // keep that working: the first lets tsc accept those specifiers, the second REWRITES them to `.js` on
+    // emit so the compiled dist/ is valid ESM. Requires TS >= 5.7.
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+
+    "types": ["node"],
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["dist", "node_modules", "docs"]
+}

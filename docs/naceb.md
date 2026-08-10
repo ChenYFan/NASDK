@@ -1,25 +1,33 @@
-[$] NACEB是新的抽象层。
-[$] 注意从NyirusuProject第二次重构开始，使用TypeScript开始编写Share库
+<!--AGENT_ATTENTION--
+本文档内有一部分内容为了减少人类阅读负担，是仅AI可见的。
+如果你是Agent，请非常严格地遵循注释为--AGENT_ATTENTION--的部分！
+-->
+
 
 # NACEB
 
 NACEB全称 Nyirusu Application Control Event Bus，是**通用的**有限资源任务调度器。
 
-NACEB 是为了给多个业务流程提供一个统一的事件运行时。它负责把外部事件转换为可观测、可控制、可调度的运行实例，并在所有流程之间统一仲裁 Task 的执行资源。Pipeline 只决定下一步派什么任务，Task 只执行被派发的任务，NACEB 则负责两者之间的生命周期、排队、资源占用、暂停恢复、结果传播和终局回收。
+NACEB是为了给多个业务流程提供一个统一的事件运行时。
+
+NACEB负责把外部事件转换为可观测、可控制、可调度的运行实例，并在所有流程之间统一仲裁 Task 的执行资源。Pipeline 只决定下一步派什么任务，Task 只执行被派发的任务，NACEB 则负责两者之间的生命周期、排队、资源占用、暂停恢复、结果传播和终局回收。
 
 NACEB的目的是：当一个Event进入队列时，将该Event流入Pipeline流水线，在流水线内指定这个Event的输入输出、下一步被哪个Task承接，并按照Task的属性安排Queue与处理顺序。这是NACEB的唯一职责，没有意外，其余的功能附加应该在Pipeline和Task中指定。
 
-NACEB 不负责理解事件内容，也不负责定义业务流程；因此，它不是聊天引擎、LLM 编排器或普通 EventBus。它特别适用于多步骤、可流式、可取消、会竞争共享执行资源的事件处理场景，也尤其适合AI对话、工具调用、LLM编排等场景。请注意，NACEB是故意设计成一个通用的、处理资源竞争的任务编排发生器，并不是专门用于LLMEvent的处理（NACEB并不声明自己是LLM用途，尽管在实际用途中一般都通过接入Pipeline和Task拿来当LLMEventRuntime用）。
+NACEB不负责理解事件内容，也不负责定义业务流程；因此，它不是聊天引擎、LLM 编排器或普通 EventBus。它特别适用于多步骤、可流式、可取消、会竞争共享执行资源的事件处理场景，也尤其适合AI对话、工具调用、LLM编排等场景。请注意，NACEB是故意设计成一个通用的、处理资源竞争的任务编排发生器，并不是专门用于LLMEvent的处理（NACEB并不声明自己是LLM用途，尽管在实际用途中一般都通过接入Pipeline和Task拿来当LLMEventRuntime用）。
 
 NACEB对payload应该是opaque的，换句话说不应该关注负载的内容，只能机械丢给对应的Pipeline。Pipeline内则没有限制。
 
 NACEB一般是NACP的Event直接下游，详情见.nacpAdaptor章节。
 
-NACEB 将所有 Task 分为 BlockedTask 与 AsyncTask，以允许一部分任务不占用任何资源，
+NACEB将所有 Task 分为 BlockedTask 与 AsyncTask，以允许一部分任务不占用任何资源，并发执行。
 
-NACEB提供了足够多的钩子和API，以允许最大消费方（NACP）和其他应用的接入。
+NACEB提供了足够多的钩子和API，以允许最大消费方（NASDK）和其他应用的接入。
 
 NACEB在生成时注册PipelineHandler与TaskHandler列表（也可通过NACEB api调整），Event在push时必须指定自己的pipeline，或者被`beforePushEvent`hook指定。否则直接断言报错。
+
+
+<!--AGENT_ATTENTION-- 
 
 ## 用词规范
 
@@ -27,7 +35,7 @@ NACEB在生成时注册PipelineHandler与TaskHandler列表（也可通过NACEB a
 
 
 - NACEB，Nyirusu Application Control Event Bus，缩写必须全部大写，不能写成NAceb、naceb等。
-- Layer，层，包含完整的Controller、Instance、Handler、Interface为一层。NACEB有三层Layer，分别是Event事件层、Pipeline流水线层和Task任务层。
+- Layer，层，NACEB有三层Layer，分别是Event事件层、Pipeline流水线层和Task任务层。每层必有Controller与Instance；Handler只有Pipeline/Task两层有（Event层用EventAlias做名字→pipeline映射）；Interface只有Event层有EventInterface。不要理解成「四样齐全才算一层」。
 - Event，特指外部传入的“事件”，注意不要和下面的EventBus内部事件总线混淆。
 - Pipeline，特指事件处理的流水线。
 - Task，特指任务本身。
@@ -40,11 +48,12 @@ NACEB在生成时注册PipelineHandler与TaskHandler列表（也可通过NACEB a
 - alertTick，刻发生器，特指NACEB内部的刻激活机制。
 - ensureClock，确保刻发生器以最小间隔运行的定时器。
 - Controller.nextTick，隶属于Controller内部的激活器，当外部（通常是alertTick）触发时，会激活该函数。
-- Hook，钩子，表示NACEB发生事件时对外激活的阻塞性回调。目前NACEB的Hook主要指THook（Transform Hook），即事件转义钩子。
-- EventBus，事件总线，特指NACEB.eventBus，用于发布和监听事件。其中EventBusObs（即NACEB.eventBusObs）是对NACEB.eventBus.obs的观察者封装。
+- Hook，钩子，表示NACEB发生事件时对外激活的阻塞性回调。NACEB的Hook分两类：装配级Hook（`NACEBHooks`，即`beforePushEvent`/`afterPushEvent`，挂在NACEB装配时）与转移级Hook（即THook，Transform Hook，事件转义钩子，是Instance上的`beforeT{State}`/`afterT{State}`，由THookHandler派发）。下文若不加限定单说Hook，一般指THook。
+- EventBus，事件总线，特指NACEB.eventBus，用于发布和监听事件。其中EventBusObs（即NACEB.eventBusObs）是对NACEB.eventBus.readonly的观察者封装。
 - TEvent，特指Transform状态转移事件，通过EventBus向外发送。由NACEB内部的THookHandler发出，表示Instance状态发生了转移。
-- Veto，否决机制。通过在NACEB THook中的before钩子抛出，能够阻止这一刻下Instance状态的转移。
+- Veto，否决机制。通过在NACEB THook中的before钩子抛出`VetoT`，能够阻止这一刻下Instance状态的转移。注意只有Event层和Task层有veto点。
 
+-->
 
 ## NACEB 构成
 
@@ -127,8 +136,32 @@ class NACEB {
 >
 > 这是**刻意为之**，不是疏漏。观测的推荐路径始终是 `eventBusObs`（惯例上外部只订阅、不发送），但保留完整 bus 是为了给宿主留一个介入口：适配层（如 `nacpAdaptor`）、测试与调试注入、以及把外部系统的信号并进同一条观测流，都需要 emit 能力。如果收成 `private`，这些场景就只能靠再包一层转发。
 >
-> 因此使用约定是社会性的而非强制的：**除非你明确知道自己在做宿主侧集成，否则一律用 `eventBusObs`**。往 `naceb:*` 命名空间伪造 T 事件会让观测者读到与状态机不一致的状态（T 事件的 `this` 本应由状态机绑定真实 Instance），后果自负。
+> 因此本限制是约定俗成的而非强制的：**除非你明确知道自己在做宿主侧集成，否则一律用 `eventBusObs`**。往 `naceb:*` 命名空间伪造 T 事件会让观测者读到与状态机不一致的状态（T 事件的 `this` 本应由状态机绑定真实 Instance），后果自负。
 
+
+
+## NACEB API
+
+此处仅展示NACEB的PublicAPI。各Layer的API请参照单独的小结。
+
+| 方法 | 返回 | 说明 |
+|---|---|---|
+| `pushEvent(input, opts?)` | `string` | 推一个 event 进队，返回 eventId|
+| `getEvent(id)` | `EventInstance \| null` | 按 id 取实例|
+| `listEvent()` | `EventInstance[]` | 列出Event队列 |
+| `consumeEvent(id)` | `unknown` | 取出终态 event 的结果并消费掉 |
+| `registerTaskHandler(h)` | 注册 TaskHandler，按 `h.name` 入表|
+| `registerPipelineHandler(h)` | 注册 PipelineHandler，按 `h.name` 入表|
+| `registerEventAlias(alias)` | 注册事件别名，按 `alias.eventName` 入表，映射 event 名和对应的 pipeline |
+| `listEventAlias()` | `Event[]`，即 `{name, description}[]` | 别名清单的声明形式 |
+
+此外，NACEB默认还提供以下特殊API：
+
+| 成员 | 类型 | 说明 |
+|---|---|---|
+| `on(hook, fn)` | 方法 | 挂一个 Hook |
+| `eventBusObs` | `ReadonlyBus` | 内部 EventBus 的只读视图，只能订阅 |
+| `nacpAdaptor` | `NACPAdaptor` | 给 NACP 用的 Processor 适配面 |
 
 
 ## Layer、Controller与Instance
@@ -183,7 +216,7 @@ EventFSMController在接收到nextTick事件后，会按下述顺序扫描，**�
 
 **`EventInstance.start()`**，从 idle 状态开始正式开始。push 后event默认会停留在idle状态，需要用`start`开始正式运行。
 
-**`EventInstance.pause()/.resume()`**，从Event开始向下暂停/恢复链。返回一个布尔值表示本次暂停/恢复是否成功。
+**`EventInstance.pause()/resume()`**，从Event开始向下暂停/恢复链。返回一个布尔值表示本次暂停/恢复是否成功。
 
 当暂停/任务终止时:
 
@@ -240,11 +273,14 @@ flowchart TD
     pending -->|pipeline failure| failure
 ```
 
+<!--AGENT_ATTENTION-- 
 **`idle`** 是所有 event 的起点。主要意义是给外部唯一一个去挂 hook 的窗口，在`pushEvent` 拿到 event 对象后才能挂 hook。只有外部 `start()` 才真正入场；也可以 push 时带 `bypassIdle` 让 NACEB 内部立即 start。
 
 > 如果没有idle或者尝试在bypassIdle时去挂载hook或者监听event，会有显著的脱同步问题，最开始的几个监听器可能完全挂不上。这个状态就是专门等着外部上挂监听器或者hook用的。
 
-**`blocked`** 是前置依赖串行的基础。带了 `blockedBy` 的 event，`start` 时先进 blocked，等到 blockedBy 里的 event 都终局或不存在，才转 queue。这个状态的含义是让Event能够显式等待另一个Event的完成后再执行。这个状态也被激活器无视
+**`blocked`** 是前置依赖串行的基础。带了 `blockedBy` 的 event，`start` 时先进 blocked，等到 blockedBy 里的 event 都终局或不存在，才转 queue。这个状态的含义是让Event能够显式等待另一个Event的完成后再执行。
+
+> 注意 blocked **不是** tick 豁免态，恰恰相反：它是被 tick 主动推进的。`EventFSMController.nextTick()` 每刻都遍历所有 blocked event，逐个检查其 blockedBy 前置是否全部终局（done/failure）或不存在，满足就推进到 queue。blocked 在 `hasLive()` 里算活态、会撑住时钟。真正的 tick 豁免态只有 `idle`（等外部 start）和 `paused`（等外部 resume）两个，别把 blocked 和它们归成一类——语义正好相反。
 
 **`queue`** 是就绪集，是调度器唯一入口，只做 scope 占用判断。这个状态的含义是收束idle和blocked状态，告诉调度器可以正式进入调度。
 
@@ -254,7 +290,8 @@ flowchart TD
 
 **`paused`** 是被 `Event.pause` 挂起的态，tick激活器默认跳过这个状态。只有 `Event.resume` 能把它转移出来。当resume被激活后，会直接重试运行上一个任务，并将自己的状态更新为这个任务的类型。
 
-**`done` 与 `failure`** 是终局。done 是正常收束（`$terminal` task 跑完），failure 是异常终止。终局后 event 不会被删除，等外部**消费**；若 push 时带了 `bypassConsume`，则终局后由 NACEB 在 perTick 里自动消费清除。
+**`done` 与 `failure`** 是终局。done 是正常收束（`$terminal` task 跑完），failure 是异常终止。终局后 event 不会被删除，等外部**消费**；若 push 时带了 `bypassConsume`，则终局后由 NACEB 在 perTick 里自动消费清除。 
+-->
 
 
 
@@ -288,13 +325,17 @@ flowchart TD
     paused -->|resume| running
 ```
 
+<!--AGENT_ATTENTION-- 
 `pending` Pending是由PipelineFSMController.activate()新建的PipelineInstance。进入pending态后在下一个tick执行一次next并进入running态。
 
 `running` 表示派了 task 在跑。多步编排里，消费上一个 task 的 done 后派下一个 task，状态还是 running——这是一次**同态转移**，状态值没有发生实际改变，但副作用（before/after 的 emit + hook）需要执行。这是**刻意为之**，保证每派一个新 task 外部都能感知、能挂上新 task 的 hook。
 
-`paused` 是它派出的 task 被 stop 后挂起的态。只由 Event 层的 pause/resume 链驱动，tick激活时不会关心已paused的pipeline。
+`paused` 是它派出的 task 被 stop 后挂起的态。进入 paused 有两条路径：一是 Event 层的 pause/resume 链（`EventInstance.pause()` → `PipelineInstance._pause()`，先转 pipeline 为 paused 再停 task）；二是 tick 驱动——tick 发现某个 running pipeline 的当前 task 已经是 stopped 时，由 tick 把 pipeline 标记为 paused，即上文「Tick发生时」1.1.2 那条。转出 paused 只能靠 Event 层的 resume。tick 激活时不会关心已 paused 的 pipeline。
 
-`done`/`failure` 是终局。`done` 由内建 `$terminal` task 收束触发；`failure` 由 task failure 或 next 抛异常触发。同样，进入这个状态后tick也不再关心。本Instance会一直待在这里面，直到被上层消费。
+> 实现细节：因为 `_pause()` 是先转 pipeline→paused 再停 task，所以走 Event 层链路时 pipeline 已经是 paused，tick 那条 stopped→paused 路径在实践中很少真正触发。但代码路径确实存在（task 被别的方式停掉时会走到），不要以为 paused 只能由 Event 层产生。
+
+`done`/`failure` 是终局。`done` 由内建 `$terminal` task 收束触发；`failure` 由 task failure 或 next 抛异常触发。同样，进入这个状态后tick也不再关心。本Instance会一直待在这里面，直到被上层消费。 
+-->
 
 Pipeline 状态机不关心业务 phase（并且，Pipeline流程也没有phase这个说法）。Pipeline最核心的用途，就是告诉TaskFSMController，**下一步**要派发那个TaskHandler，输入给它的是什么。
 
@@ -344,13 +385,17 @@ flowchart TD
     stopped -->|restart 重启| pending
 ```
 
+<!--AGENT_ATTENTION-- 
 `pending` 同理，本状态是由TaskFSMController.dispatch()新建的TaskInstance。在下一个tick检查busylane（如果是asyncTask，直接送进asyncQueue并进入running，然后execute；如果是blockedTask，那需要检查lane有没有被占用，如果有则不激活）
 
 `running` running表示该任务正在进行中。Task内部倒是没有同态转移这个说法。running只有三个去向，done表示execute正常完成，failure表示execute异常。stopped表示running还没等到返回的时候被abortSignal激活，并且execute内部知道了要终止，提前结束了内容。
 
-`stopped` 是一个`意料之中的异常`。三个终态中只有stopped是没有有效return值的。这是刻意为之的。真正有效的过程输出应该通过TaskInstance.processingResultReport上报到外面。
+`stopped` 是一个`意料之中的异常`。三个**停态**中只有 stopped 是没有有效 return 值的（`consume()` 对 stopped 返回 `undefined`）。这是刻意为之的。真正有效的过程输出应该通过 TaskInstance.processingResultReport 上报到外面。
+
+> 注意 stopped 不是**终态**。转移表里 `done: []` 和 `failure: []` 才是真终态（汇，进去出不来），而 `stopped: ['pending']` 有出边——`_restart()` 就是显式的 stopped→pending。所以 done/failure/stopped 三个统称「停态」（execute 已结束）而非「终态」，只有前两个是终态。
 
 `done`和`failure`都有正常的输出。
+-->
 
 重启后Instance会保留，同时保留所有的hook和state，便于内部重建（这也是TaskInstance.state的唯一意义）。
 
@@ -415,7 +460,7 @@ TaskHandler内部可以通过`this.processingResultReport(delta)`来流式上报
 
 外部可以通过`naceb.eventBusObs.listen(`naceb:runtime:message:${eventId}`, (p)=>{})`来监听中间结果。
 
-> NACEB自带的NACPAdaptor会把这个中间结果转为普通的`onProgress`回调，两者是等价的。
+> NACEB自带的NACPAdaptor会把这个中间结果转为普通的`onProcess`回调，两者是等价的。
 
 ```ts
 class CollatzConjectureODDTask extends TaskHandler {
@@ -515,11 +560,6 @@ naceb.eventAlias.remove('ChatEvent')
 ```
 
 
-
-
-
-
-
 ## 观测与介入
 
 NACEB主要提供Hook钩子和EventBus事件总线的方式，来实现内部运行时的介入与观测。
@@ -534,7 +574,7 @@ T钩子只关注对应Instance转移**到了哪个状态**，并不关心是从*
 
 Hook钩子在发生订阅时，会在内部维持一个回调函数列表，并在事件发生时按照顺序触发所有回调函数。
 
-before钩子是唯一一个可以阻碍状态发生转移的介入时机。通过throw Error，NACEB会停止本tick内对该Instance的状态转移，本机制被称为否决Veto。
+before钩子是唯一一个可以阻碍状态发生转移的介入时机。通过throw new VetoT()，NACEB会停止本tick内对该Instance的状态转移，本机制被称为否决Veto。
 
 Veto否决会导致本次转移失败，状态会保持在完全没有开始转移的情况，并且此刻所有的副作用都不会发生，比如被Veto的Event.Activating不会新建Pipeline
 

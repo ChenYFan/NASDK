@@ -143,7 +143,7 @@ export class NACEB {
     return id
   }
 
-  getAllEvents(): Event[] {
+  listEventAlias(): Event[] {
     return [...this.eventAlias.list()].map(a => ({ name: a.eventName, description: a.description }))
   }
 

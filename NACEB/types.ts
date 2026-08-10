@@ -9,6 +9,9 @@
  */
 
 import type { EventInstance } from './controller/EventFSMController.ts'
+// Runtime observation payload + level superset live at the NASDK root: NACEB and NACAB both narrate on the
+// same shape, so it is not either layer's to own.
+import type { RuntimeLevelAll, RuntimePayload, RuntimeEmitFor } from '../types.ts'
 
 // ---- status ----
 export type EventStatus =
@@ -107,11 +110,10 @@ export interface EventAlias {
   description: string
 }
 
-/** NACP Event declaration item (name + description). getAllEvents() returns Event[]. Symmetric with NACAB's Ability. */
-export interface Event {
-  name: string
-  description: string
-}
+/** The NACP declaration item (name + description) that `listEventAlias()` returns. Defined at the NASDK root
+ *  (../types.ts) and re-exported here: NACEB, NACAB and NACP all need this one shape, so there is one
+ *  definition rather than three identical copies. */
+export type { Event } from '../types.ts'
 
 /** pushEvent behavior options (not event properties). */
 export interface PushOpts {
@@ -190,19 +192,14 @@ export type TransitionFunc = () => void | Promise<void>
  *   - warning : a runtime warning. id = the triggering layer's instance id.
  *   - log     : an internal log line (transitions, idle/consume). id = the triggering layer's instance id.
  *   - message : formal process output from a running task. id = the eventId (process output belongs to the event).
- * payload is {layer,id,msg?,opt?}: layer/id/msg are the stable fields; anything level-specific (a
- * transition's from/to/same, an error's phase/state, a message's chunk/taskId) rides in `opt` — an
- * observer that doesn't care never touches it.
+ *
+ * `RuntimePayload` is shared with NACAB and therefore defined at the NASDK root; the LEVEL SET is not shared —
+ * NACAB has no `message`, because an ability produces no process output.
  */
-export type RuntimeLevel = 'error' | 'warning' | 'log' | 'message'
-export interface RuntimePayload {
-  layer: string
-  id: string
-  msg?: string
-  opt?: Record<string, unknown>
-}
+export type RuntimeLevel = RuntimeLevelAll
+export type { RuntimePayload }
 /** Injected by NACEB at assembly: emits `naceb:runtime:{level}:{id}` on the internal EventBus. */
-export type RuntimeEmit = (level: RuntimeLevel, id: string, payload: RuntimePayload) => void
+export type RuntimeEmit = RuntimeEmitFor<RuntimeLevel>
 
 /** THookHandler：触发一个 T 事件 = emit T 事件（readonlyView 骑 this）+ 顺序跑该状态的 hook 列表。
  *  概念上 emit 是 hook 列表的第 0 位；实现上先 emit 后跑 hook（等价）。原 `_phase`。 */
