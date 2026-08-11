@@ -50,6 +50,18 @@ test('精确订阅和通配符订阅同时命中', () => {
   assert.deepEqual(order.sort(), ['exact', 'wild'])
 })
 
+test('没有 ** 多段匹配 —— ** 只是一个普通的字面段', () => {
+  const bus = new EventBus()
+  const got = []
+  bus.listen('a:**', (_p, k) => got.push(k))
+
+  bus.emit('a:b:c', {})     // 想当然的「** 跨段」并不成立
+  bus.emit('a:b', {})       // 段数对，但 ** 不是 *，不匹配任意值
+  bus.emit('a:**', {})      // 字面相等，这才命中
+
+  assert.deepEqual(got, ['a:**'], '** 没有任何特殊含义，就是两个星号字符')
+})
+
 test('没有匹配的订阅时 emit 是安全空操作', () => {
   const bus = new EventBus()
   assert.doesNotThrow(() => bus.emit('nobody:listening', { x: 1 }))
@@ -90,9 +102,18 @@ test('listenOnce 触发前可以取消', () => {
   assert.equal(fired, false)
 })
 
-test('off 不存在的 id 返 false，不抛', () => {
+test('off 返 false 的三种情形：重复 off、listenOnce 已自摘、id 压根不存在', () => {
   const bus = new EventBus()
-  assert.equal(bus.off('sub-不存在'), false)
+
+  const a = bus.listen('k', () => {})
+  assert.equal(bus.off(a), true)
+  assert.equal(bus.off(a), false, '重复 off')
+
+  const b = bus.listenOnce('k', () => {})
+  bus.emit('k', {})
+  assert.equal(bus.off(b), false, 'listenOnce 触发完自己摘了，这个 id 自然失效')
+
+  assert.equal(bus.off('sub-不存在'), false, '压根没有过')
 })
 
 test('emit 期间新增的订阅不参与本次派发', () => {
@@ -121,6 +142,24 @@ test('hitKey 就是 emit 的那个 key，精确订阅时等于模式本身', () 
 
 // ── 错误隔离 ──
 
+test('一个 listener 抛错不挡后面的 —— 这是不用 EventEmitter 的理由', () => {
+  const bus = new EventBus()
+  const errs = [], ran = []
+  bus.onError = (key, err) => errs.push({ key, msg: err.message })
+
+  bus.listen('k:go', () => { ran.push('A'); throw new Error('A 炸') })
+  bus.listen('k:go', () => { ran.push('B') })
+  bus.listen('k:*', () => { ran.push('C'); throw new Error('C 炸') })
+  bus.listen('k:*', () => { ran.push('D') })
+
+  bus.emit('k:go', {})
+
+  assert.deepEqual(ran, ['A', 'B', 'C', 'D'], '四个都跑到了，炸的那两个没截断队列')
+  assert.deepEqual(errs.map(e => e.msg), ['A 炸', 'C 炸'], '两条都上报，一条不漏')
+  assert.deepEqual(errs.map(e => e.key), ['k:go', 'k:go'],
+    'onError 的 key 是本次 emit 的具体 key，不是订阅时的通配模式')
+})
+
 test('异步回调 reject 也进 onError，不冒泡', async () => {
   const bus = new EventBus()
   const errs = []
@@ -132,6 +171,22 @@ test('异步回调 reject 也进 onError，不冒泡', async () => {
 
   assert.equal(errs.length, 1)
   assert.equal(errs[0].msg, 'async 炸')
+  assert.equal(errs[0].key, 'k', 'key 也一并带上')
+})
+
+test('异步 reject 同样不挡后续 —— 后面的是同步跑完的，不等前面的 promise', async () => {
+  const bus = new EventBus()
+  const errs = [], ran = []
+  bus.onError = (_k, err) => errs.push(err.message)
+
+  bus.listen('k', async () => { ran.push('A'); throw new Error('A 炸') })
+  bus.listen('k', () => ran.push('B'))
+  bus.emit('k', {})
+
+  assert.deepEqual(ran, ['A', 'B'], 'emit 返回时两个都已调用')
+  assert.deepEqual(errs, [], 'A 的 reject 此刻还没落地')
+  await new Promise((r) => setImmediate(r))
+  assert.deepEqual(errs, ['A 炸'], '下一轮微任务才上报')
 })
 
 test('onError 默认是空操作 —— 不设也不会崩', () => {
@@ -152,6 +207,19 @@ test('asyncListenOnce：cb 的返回值决定 resolve 值，抛出则 reject', a
     bus.asyncListenOnce('b', () => { throw new Error('await 的观测者有调用方可以报错') }),
     /await 的观测者/,
   )
+
+  // cb 返回一个 rejected promise 和同步 throw 等价 —— 都 reject 调用方，都不进 onError
+  const errs = []
+  bus.onError = (_k, e) => errs.push(e.message)
+  setTimeout(() => bus.emit('b2', {}), 5)
+  await assert.rejects(bus.asyncListenOnce('b2', async () => { throw new Error('async 也一样') }), /async 也一样/)
+  assert.deepEqual(errs, [], 'asyncListenOnce 的错有明确去处，不走 onError 兜底')
+})
+
+test('asyncListenOnce 支持通配符 key', async () => {
+  const bus = new EventBus()
+  setTimeout(() => bus.emit('cfg:loaded:test', { v: 'v1' }), 5)
+  assert.equal(await bus.asyncListenOnce('cfg:loaded:*', (p) => p.v), 'v1')
 })
 
 test('asyncListenOnce 不带 cb 时 resolve 的是 payload', async () => {
@@ -201,9 +269,47 @@ test('readonlyView：读透传、方法可调、写抛错', () => {
   assert.equal(view.status, 'done', '真对象仍可被自己改，视图看到最新值')
 })
 
-test('readonly 视图只有四个订阅口', () => {
+test('readonlyView 是浅的：嵌套对象和方法副作用都照常生效', () => {
+  // 文档把这三条写成明确的「不保护」，所以要有测试钉住 —— 哪天谁加了深冻结，
+  // 上面那条测试会照样绿，只有这条会红，提醒他文档得跟着改。
+  const target = {
+    status: 'running',
+    state: { count: 0 },
+    bump() { this.status = 'bumped' },
+  }
+  const view = readonlyView(target)
+
+  view.state.count++
+  assert.equal(target.state.count, 1, '嵌套对象是裸返回的，改得动')
+
+  view.bump()
+  assert.equal(target.status, 'bumped', '方法 bind 回真身，副作用照常落到真对象上')
+
+  assert.throws(() => { view.status = 'x' }, /readonly/, '但根级直接写还是拦的')
+})
+
+test('readonly 视图只有四个订阅口，emit 是真的取不到', () => {
   const bus = new EventBus()
   assert.deepEqual(Object.keys(bus.readonly).sort(), ['asyncListenOnce', 'listen', 'listenOnce', 'off'])
+  assert.equal(bus.readonly.emit, undefined, '不只是 keys 里没有 —— 顺原型链也摸不到')
+})
+
+test('readonly 的四个口都能真的用', async () => {
+  const bus = new EventBus()
+  const obs = bus.readonly
+
+  let a = 0, b = 0
+  obs.listen('r:a', () => a++)
+  obs.listenOnce('r:b', () => b++)
+  const waiting = obs.asyncListenOnce('r:c', (p) => p.v * 2)
+
+  bus.emit('r:a', {}); bus.emit('r:a', {})
+  bus.emit('r:b', {}); bus.emit('r:b', {})
+  bus.emit('r:c', { v: 21 })
+
+  assert.equal(a, 2, 'listen 持续')
+  assert.equal(b, 1, 'listenOnce 只一次')
+  assert.equal(await waiting, 42, 'asyncListenOnce 走 cb 的返回值')
 })
 
 test('readonly 的 off 能取消通过它建的订阅', () => {

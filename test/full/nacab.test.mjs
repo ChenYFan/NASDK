@@ -159,6 +159,52 @@ test('T 事件：六条齐全，layer 段是 ability', async () => {
   ])
 })
 
+test('T 事件的 before/after 夹着状态写：before 看到旧值，after 看到新值', async () => {
+  const nacab = new NACAB()
+  nacab.register({ name: 'ok', description: 'x', execute: () => 1 })
+  nacab.register({ name: 'bad', description: 'x', execute: () => { throw new Error('x') } })
+
+  const seen = []
+  nacab.eventBusObs.listen('nacab:ability:*:*:*', function (_p, k) {
+    const [, , state, half] = k.split(':')
+    seen.push(`${state}:${half}=${this.status}`)
+  })
+
+  await nacab.invoke('ok', {})
+  assert.deepEqual(seen, [
+    'running:before=pending',    // pending 是构造初值，没有自己的 T 事件，只在这里露一次脸
+    'running:after=running',
+    'done:before=running',
+    'done:after=done',
+  ], '成功路径：每条 before 是旧值、after 是新值')
+
+  seen.length = 0
+  await nacab.invoke('bad', {}).catch(() => {})
+  assert.deepEqual(seen, [
+    'running:before=pending',
+    'running:after=running',
+    'failure:before=running',
+    'failure:after=failure',
+  ], '失败路径同理，running → failure')
+})
+
+test('done:after 的视图上读得到 result，failure:after 上读得到 error 原对象', async () => {
+  const nacab = new NACAB()
+  nacab.register({ name: 'ok', description: 'x', execute: () => ({ n: 42 }) })
+  const boom = new Error('原因')
+  nacab.register({ name: 'bad', description: 'x', execute: () => { throw boom } })
+
+  let result, error
+  nacab.eventBusObs.listen('nacab:ability:done:after:*', function () { result = this.result })
+  nacab.eventBusObs.listen('nacab:ability:failure:after:*', function () { error = this.error })
+
+  await nacab.invoke('ok', {})
+  assert.deepEqual(result, { n: 42 }, 'result 在 done 之前就写好了，观测者当场能读到')
+
+  await nacab.invoke('bad', {}).catch(() => {})
+  assert.equal(error, boom, 'error 是抛出的那个原对象，不是 message 字符串')
+})
+
 test('T 事件的 this 是只读视图，改不了', async () => {
   const nacab = new NACAB()
   nacab.register({ name: 'ok', description: 'x', execute: () => 1 })
@@ -169,6 +215,21 @@ test('T 事件的 this 是只读视图，改不了', async () => {
   })
   await nacab.invoke('ok', {})
   assert.equal(threw, true, '观测者不能改状态')
+})
+
+test('只读视图是每条 T 事件都包的，不止 done:after', async () => {
+  const nacab = new NACAB()
+  nacab.register({ name: 'ok', description: 'x', execute: () => 1 })
+
+  const blocked = []
+  nacab.eventBusObs.listen('nacab:ability:*:*:*', function (_p, k) {
+    // 换个字段试，证明拦的是所有写而不是单挑 status
+    try { this.result = '篡改' } catch { blocked.push(k.split(':').slice(2, 4).join(':')) }
+  })
+  await nacab.invoke('ok', {})
+
+  assert.deepEqual(blocked, ['running:before', 'running:after', 'done:before', 'done:after'],
+    '四条 T 事件的 this 都是写保护的')
 })
 
 test('T 事件的 id 段就是 AbilityInstance 的 id，同一次调用前后一致', async () => {
@@ -192,14 +253,21 @@ test('runtime：成功两条 log，失败一条 error', async () => {
   await nacab.invoke('ok', {})
   assert.equal(logs.events.length, 2, 'invoke 进入 + 正常终结')
   assert.equal(errs.events.length, 0)
+  assert.match(logs.events[0].payload.msg, /^invoke 'ok'/, '第一条叙述进入')
+  assert.match(logs.events[1].payload.msg, /^done 'ok'/, '第二条叙述终结')
+  assert.equal(logs.events[0].payload.opt.name, 'ok', 'opt.name 是能力名')
 
   await nacab.invoke('bad', {}).catch(() => {})
   assert.equal(errs.events.length, 1)
   assert.equal(errs.events[0].payload.opt.error.message, '原因', 'opt.error 是原对象')
+  assert.equal(errs.events[0].payload.opt.name, 'bad', 'opt.name 指出是哪个能力炸的')
 
   await nacab.invoke('不存在', {}).catch(() => {})
   assert.equal(errs.events.length, 2, '未知能力也进 error 通道')
   assert.equal(errs.events[1].payload.opt.code, 'unknown-ability')
+  assert.equal(errs.events[1].payload.opt.name, '不存在',
+    '未知能力这条没有实例，id/name 只能是被找的那个名字 —— 否则观测者无从知道谁没找到')
+  assert.equal(errs.events[1].payload.id, '不存在')
 
   logs.stop(); errs.stop()
 })
@@ -232,12 +300,34 @@ test('观测者抛异常 → runtime:error:bus，不影响 invoke 结果', async
   const nacab = new NACAB()
   nacab.register({ name: 'ok', description: 'x', execute: () => 'result' })
   const busErrs = collect(nacab.eventBus, 'nacab:runtime:error:bus')
-  nacab.eventBusObs.listen('nacab:ability:done:after:*', () => { throw new Error('观测者炸了') })
+  const boom = new Error('观测者炸了')
+  nacab.eventBusObs.listen('nacab:ability:done:after:*', () => { throw boom })
 
   assert.equal(await nacab.invoke('ok', {}), 'result', 'invoke 不受影响')
   busErrs.stop()
   assert.equal(busErrs.events.length, 1)
-  assert.equal(busErrs.events[0].payload.layer, 'bus')
+
+  const { payload } = busErrs.events[0]
+  assert.equal(payload.layer, 'bus')
+  assert.equal(payload.id, 'bus', 'bus 自己的错不属于任何 ability 实例，id 也是 bus')
+  assert.equal(payload.opt.error, boom, 'opt.error 是观测者抛的原对象')
+  assert.match(payload.opt.key, /^nacab:ability:done:after:/, 'opt.key 指出是哪条事件的观测者炸的')
+  assert.equal(typeof payload.msg, 'string')
+})
+
+test('runtime 只有 error/log 两个级会真的发出来', async () => {
+  const nacab = new NACAB()
+  nacab.register({ name: 'ok', description: 'x', execute: () => 1 })
+  nacab.register({ name: 'bad', description: 'x', execute: () => { throw new Error('x') } })
+
+  const all = collect(nacab.eventBus, 'nacab:runtime:*:*')
+  await nacab.invoke('ok', {})
+  await nacab.invoke('bad', {}).catch(() => {})
+  all.stop()
+
+  const levels = [...new Set(all.events.map(e => e.hitKey.split(':')[2]))].sort()
+  assert.deepEqual(levels, ['error', 'log'],
+    'warning 是类型里声明的级别，但 NACAB 没有任何代码路径会发它 —— 能力只有成/败，没有「继续但需注意」')
 })
 
 test('eventBusObs 是只读的，没有 emit', () => {
@@ -266,10 +356,12 @@ test('1000 次调用后内部表不增长', async () => {
 // ── adaptor ──
 
 test('adaptor 满足 Processor 契约：list / push / register', () => {
-  const a = new NACAB().nacpAdaptor
+  const nacab = new NACAB()
+  const a = nacab.nacpAdaptor
   assert.equal(typeof a.list, 'function')
   assert.equal(typeof a.push, 'function')
   assert.equal(typeof a.register, 'function')
+  assert.equal(nacab.nacpAdaptor, a, '每次取到的是同一个 adaptor —— bindProcessor 拿到的和之后观测的是一个对象')
 })
 
 test('adaptor.register 转发到同一张表', async () => {
@@ -298,6 +390,7 @@ test('adaptor.push 失败：whyNotOk 只报协议级，细节在 payload', async
   const nacab = new NACAB()
   nacab.register({ name: 'bad', description: 'x', execute: () => { throw new Error('内部原因') } })
 
+  const detail = {}
   for (const target of ['bad', '不存在']) {
     const out = await new Promise((resolve) => {
       nacab.nacpAdaptor.push(
@@ -308,7 +401,11 @@ test('adaptor.push 失败：whyNotOk 只报协议级，细节在 payload', async
     assert.equal(out.isOk, false)
     assert.equal(out.why, 'processor-failed', `${target}: NACAB 词汇不外泄`)
     assert.ok(typeof out.r.error === 'string', '细节进 payload')
+    detail[target] = out.r.error
   }
+  // errorDetail 取的是 message 而不是 String(err)，所以没有 "Error: " 前缀
+  assert.equal(detail['bad'], '内部原因', 'handler 抛的 Error 取其 message')
+  assert.match(detail['不存在'], /不存在/, '未知能力这条要说出是哪个名字没找到')
 })
 
 test('adaptor.push 的返回值 NACAB 侧是 void —— 两层 id 隔离', () => {

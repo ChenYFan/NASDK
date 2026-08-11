@@ -10,10 +10,11 @@ import net from 'node:net'
 
 import { cborCodec } from '../../NACT/codec.ts'
 import {
-  FRAG_HEADER, MAX_FRAME_SIZE, DEFAULT_CHUNK, DEFAULT_HEARTBEAT_MS, NACT_VERSION,
+  FRAG_HEADER, MAX_FRAME_SIZE, DEFAULT_CHUNK, DEFAULT_HEARTBEAT_MS, NACT_VERSION, MAGIC_BY_VERSION,
   checkFragHeader, packFragHeader, makeReassembler, makeStreamParser, splitAndEmit, toHex,
 } from '../../NACT/framing.ts'
 import { NACTError } from '../../NACT/errors.ts'
+import { NACTEvent } from '../../NACT/events.ts'
 import { startApp, startPair, tcp, ws, unix, PORT, sleep } from '../_kit.mjs'
 
 const aMsg = (payload) => ({
@@ -266,11 +267,25 @@ test('裸流：头里的 frameSize 越界要抛 NACTError', () => {
   assert.throws(() => parse(h), (e) => e instanceof NACTError && e.code === 'frame-too-large')
 })
 
-test('裸流：坏头抛 NACTError', () => {
+test('裸流：坏头抛 NACTError，且 layer/phase 都填对', () => {
   const h = packFragHeader(new Uint8Array(16), 0, 10, 0)
   h[31] = 99
   const parse = makeStreamParser(makeReassembler(() => {}, () => {}))
-  assert.throws(() => parse(h), (e) => e instanceof NACTError && e.code === 'version-mismatch')
+  assert.throws(() => parse(h), (e) => {
+    assert.ok(e instanceof NACTError)
+    assert.equal(e.code, 'version-mismatch')
+    assert.equal(e.layer, 'NACT', 'layer 恒为 NACT')
+    assert.equal(e.phase, 'inbound', '坏字节进来是 inbound —— 三个工厂分相就是为了这个')
+    return true
+  })
+})
+
+test('越界的片被拒（offset+len 超出 totalSize）', () => {
+  const errs = []
+  const reasm = makeReassembler(() => assert.fail('不该完成'), (r) => errs.push(r))
+  reasm.ensure('b', 100)
+  reasm.advance('b', 80, 40)          // 80+40 > 100
+  assert.deepEqual(errs, ['fragment-out-of-bounds'])
 })
 
 // ── 常量 ──
@@ -284,43 +299,143 @@ test('默认值都在合理范围', () => {
   }
 })
 
+test('当前版本在 magic 表里，且 packFragHeader 写的就是表里那个', () => {
+  assert.ok(NACT_VERSION in MAGIC_BY_VERSION, `v${NACT_VERSION} 有对应 magic`)
+  const h = packFragHeader(new Uint8Array(16), 0, 10, 0)
+  const dv = new DataView(h.buffer, h.byteOffset, h.byteLength)
+  assert.equal(dv.getUint8(30), MAGIC_BY_VERSION[NACT_VERSION], 'magic 取自版本表而不是写死')
+})
+
 // ── 真 carrier ──
 
-test('peer 表：连上入表、断开离表，disconnect 只报一次', async () => {
+test('peer 表：连上入表、断开离表，disconnect 只报一次且带走的是那个 peerId', async () => {
   const spec = tcp(PORT.nact)
   const { srv, cli, stop } = await startPair(spec)
 
   assert.equal(srv.nact.listPeerId().length, 1, '服务端有一个 peer')
   assert.equal(cli.nact.listPeerId().length, 1)
 
+  const peerId = srv.nact.listPeerId()[0]
   const announced = []
-  srv.bus.listen('nact:peer:disconnect', (p) => announced.push(p.peerId))
+  srv.bus.listen(NACTEvent.peerDisconnect, (p) => announced.push(p.peerId))
 
   await cli.disconnect('srv')
   await sleep(60)
 
   assert.equal(announced.length, 1, `断开只announce一次，实得 ${announced.length}`)
+  assert.equal(announced[0], peerId, 'payload 里是具体走掉的那个 peerId，不是随便一个')
   assert.equal(srv.nact.listPeerId().length, 0, '服务端 peer 表清空')
 
   await stop()
 })
 
-test('closePeer：resolve 时 peer 已离表', async () => {
+test('connect 事件：入表和 announce 是同一件事', async () => {
+  const spec = tcp(PORT.nact + 12)
+  const { app: srv, stop: stopSrv } = await startApp('srv', { server: [spec] })
+
+  // 在对端拨进来之前就挂上，否则 connect 早于订阅
+  const seen = []
+  srv.bus.listen(NACTEvent.peerConnect, (p) => seen.push(p.peerId))
+
+  const { app: cli, stop: stopCli } = await startApp('cli')
+  await cli.connect('srv', spec)
+  await sleep(60)
+
+  assert.equal(seen.length, 1, '一条连接 announce 一次')
+  assert.deepEqual(seen, srv.nact.listPeerId(), 'announce 的 peerId 就是表里那个')
+
+  await stopCli(); await stopSrv()
+})
+
+test('closePeer 的 resolve 是等 disconnect 事件等来的', async () => {
   const spec = tcp(PORT.nactWs)
   const { cli, stop } = await startPair(spec)
 
   const peerId = cli.nact.listPeerId()[0]
+  // closePeer 内部就是订阅 peerDisconnect 来 settle 的，所以事件必然先于 resolve
+  let announcedAt = -1, n = 0
+  cli.bus.listen(NACTEvent.peerDisconnect, (p) => { if (p.peerId === peerId) announcedAt = ++n })
+
   assert.equal(await cli.nact.closePeer(peerId), true)
+  assert.equal(announcedAt, 1, 'resolve 时 disconnect 已经播过了')
   assert.equal(cli.nact.getPeer(peerId), undefined, 'resolve 后表里已经没有它')
+  assert.equal(cli.nact.closePeer(peerId) instanceof Promise, true, '没这个 peer 也返 Promise，不是 undefined')
   assert.equal(await cli.nact.closePeer(peerId), false, '再关一次返 false')
 
   await stop()
 })
 
-test('sendToPeer 对不存在的 peerId 返 false', async () => {
-  const { app, stop } = await startApp('solo')
-  assert.equal(app.nact.sendToPeer('不存在的 peer', aMsg({})), false)
+test('sendToPeer：找到就 true，找不到就 false', async () => {
+  const spec = tcp(PORT.nact + 13)
+  const { cli, stop } = await startPair(spec)
+
+  assert.equal(cli.nact.sendToPeer('不存在的 peer', aMsg({})), false)
+  assert.equal(cli.nact.sendToPeer(cli.nact.listPeerId()[0], aMsg({})), true, '真 peer 上返 true')
+
   await stop()
+})
+
+test('addPeer / getPeer / dropPeer / listPeerId 是一套自洽的表操作', async () => {
+  const { app, stop } = await startApp('table')
+  const fake = { id: 'p-手搓', send() {}, close() {} }
+
+  assert.equal(app.nact.getPeer('p-手搓'), undefined, '还没加')
+  app.nact.addPeer(fake)
+  assert.equal(app.nact.getPeer('p-手搓'), fake, 'getPeer 拿回同一个对象')
+  assert.deepEqual(app.nact.listPeerId(), ['p-手搓'])
+
+  assert.equal(app.nact.dropPeer('p-手搓'), true, '真删掉了返 true')
+  assert.equal(app.nact.dropPeer('p-手搓'), false, '重复 drop 可见，不静默')
+  assert.deepEqual(app.nact.listPeerId(), [])
+
+  // addPeer 按 peer.id 覆盖：同 id 再加是替换而不是并存
+  const dupA = { id: 'dup', send() {}, close() {} }
+  const dupB = { id: 'dup', send() {}, close() {} }
+  app.nact.addPeer(dupA)
+  app.nact.addPeer(dupB)
+  assert.equal(app.nact.listPeerId().length, 1, '同 id 只有一行')
+  assert.equal(app.nact.getPeer('dup'), dupB, '后加的那个赢')
+
+  await stop()
+})
+
+test('listen 的 onPeer 拿到的 peer 已经在表里了', async () => {
+  const spec = tcp(PORT.nact + 14)
+  const { app: srv, stop: stopSrv } = await startApp('srv')
+
+  const handed = []
+  const handle = await srv.nact.listen(spec, (peer) => handed.push(peer))
+
+  const { app: cli, stop: stopCli } = await startApp('cli')
+  await cli.connect('srv', spec)
+  await sleep(60)
+
+  assert.equal(handed.length, 1, 'onPeer 收到这条连接')
+  assert.equal(srv.nact.getPeer(handed[0].id), handed[0], '交到 onPeer 手上时已入表 —— 握手不用自己补登记')
+  assert.equal(typeof handle.close, 'function', 'listen 返回的 handle 能关')
+
+  await stopCli(); await stopSrv()
+})
+
+test('terminate：peer 表清空、且teardown 期间不播 disconnect', async () => {
+  const spec = tcp(PORT.nact + 15)
+  const { app: srv, stop: stopSrv } = await startApp('srv', { server: [spec] })
+  const { app: cli } = await startApp('cli')
+  await cli.connect('srv', spec)
+  await sleep(60)
+  assert.equal(srv.nact.listPeerId().length, 1)
+
+  const announced = []
+  srv.bus.listen(NACTEvent.peerDisconnect, (p) => announced.push(p.peerId))
+
+  await srv.nact.terminate()
+  await sleep(80)                       // 给 socket 的 close 事件留出到达时间
+
+  assert.equal(srv.nact.listPeerId().length, 0, '整层 teardown 后表是空的')
+  assert.equal(announced.length, 0,
+    `terminate 是安静的：表先清空，socket 的 close 到达时 gone 找不到行可删，就不 announce。实得 ${announced.length} 条`)
+
+  await stopSrv()
 })
 
 test('三种 carrier 传同一条大消息，结果一致', async (t) => {
@@ -331,10 +446,13 @@ test('三种 carrier 传同一条大消息，结果一致', async (t) => {
     ['unix', unix('nact-full')],
   ]) {
     await t.test(name, async () => {
-      const { cli, stop } = await startPair(spec)
+      const { srv, cli, stop } = await startPair(spec)
       const res = await cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } })
       assert.equal(res.payload.big.length, big.length)
       assert.equal(res.payload.big, big)
+      // Peer 抽象是承载无关的：不管底下是 socket 还是 ws 帧，上面看到的都是一行 peer
+      assert.equal(cli.nact.listPeerId().length, 1, `${name}: 客户端一行 peer`)
+      assert.equal(srv.nact.listPeerId().length, 1, `${name}: 服务端一行 peer`)
       await stop()
     })
   }
