@@ -587,7 +587,24 @@ export class NACP {
   private onSubscribe(msg: SubscribeMessage, { autoSub = false }: { autoSub?: boolean } = {}) {
     const subId = msg.id
     const subscriber = msg.from
-    const targetSubName = (msg.payload as SubscribePayload).targetSubName
+    const targetSubName = (msg.payload as SubscribePayload)?.targetSubName
+
+    // Malformed-field guard: a subscribe missing targetSubName would otherwise reach bus.listen(undefined),
+    // whose key.split(':') throws — and that throw propagates out of inbound() into NACT's peer path, which
+    // treats it as a framing fault and tears the connection down. So one bad frame drops a whole connection.
+    // Reject it in-band instead (emit + isOk:false response), the same shape as onRegister's refusal, so the
+    // peer learns why in ~10ms instead of waiting out the 10s handshake timeout, and the link stays up.
+    if (typeof targetSubName !== 'string' || !targetSubName) {
+      this.napp.bus.emit(NACPInternal.subscribeError, { msg, reason: 'bad-target-sub-name' })
+      if (!autoSub) {
+        this.response(subscriber, {
+          parentId: subId,
+          isOk: false,
+          whyNotOk: 'bad-target-sub-name',
+        })
+      }
+      return
+    }
 
     const listenId = this.registerForwardingListener(subId, subscriber, targetSubName)
     this.subscribeTable.add({ subId, appId: subscriber, listenId, targetSubName })

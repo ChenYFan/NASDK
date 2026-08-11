@@ -90,7 +90,7 @@ export const NACPInternal = {
   responseError:  'nacp:internal:response:error',    // reason: has-no-consumer
   routeError:     'nacp:internal:route:error',       // reason: no-route | send-failed | self-addressed
   notifyError:    'nacp:internal:notify:error',      // reason: has-no-consumer
-  subscribeError: 'nacp:internal:subscribe:error',   // reason: unknown-subscription
+  subscribeError: 'nacp:internal:subscribe:error',   // reason: unknown-subscription | bad-target-sub-name
 } as const
 
 // ── payload shapes (observation only; NACP never reads these to make a decision) ──

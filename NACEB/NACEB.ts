@@ -71,7 +71,7 @@ export class NACEB {
     // is printed (a pure bus emit), symmetric with the T-event surface.
     this._emit = (level, id, payload) => this.eventBus.emit(`naceb:runtime:${level}:${id}`, payload)
     this.eventBus.onError = (key, err) =>
-      this.eventBus.emit(`naceb:runtime:error:bus`, { layer: 'bus', id: 'bus', msg: `observer error @${key}: ${(err as any)?.message ?? err}`, opt: { key, error: err } })
+      this.eventBus.emit(`naceb:runtime:error:bus`, { layer: 'bus', id: 'bus', msg: `observer error @${key}: ${(err as any)?.message ?? String(err)}`, opt: { key, error: err } })
     for (const a of opts.eventAlias ?? []) this.eventAlias.register(a)
     for (const p of opts.pipelineHandlers) this.pipelineHandlers.register(p)
     for (const h of opts.taskHandlers) this.taskHandlers.register(h)
@@ -84,7 +84,7 @@ export class NACEB {
       if (ph === 'before') { for (const fn of hks) await fn.call(obj) }
       else for (const fn of hks) {
         try { await fn.call(obj) }
-        catch (e) { this._emit('error', id, { layer, id, msg: `afterT hook threw: ${(e as any)?.message ?? e}`, opt: { state, phase: ph, error: e } }) }
+        catch (e) { this._emit('error', id, { layer, id, msg: `afterT hook threw: ${(e as any)?.message ?? String(e)}`, opt: { state, phase: ph, error: e } }) }
       }
     }
 

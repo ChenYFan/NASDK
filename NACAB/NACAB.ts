@@ -45,7 +45,7 @@ export class NACAB {
     this.eventBus.onError = (key, err) =>
       this._emit('error', 'bus', {
         layer: 'bus', id: 'bus',
-        msg: `observer error @${key}: ${(err as any)?.message ?? err}`,
+        msg: `observer error @${key}: ${(err as any)?.message ?? String(err)}`,
         opt: { key, error: err },
       })
     for (const h of opts?.handlers ?? []) this.registerHandler(h)
@@ -124,7 +124,7 @@ export class NACAB {
       this.transition(t, 'failure')
       this._emit('error', t.id, {
         layer: LAYER, id: t.id,
-        msg: `ability '${name}' threw: ${(err as any)?.message ?? err}`,
+        msg: `ability '${name}' threw: ${(err as any)?.message ?? String(err)}`,
         opt: { name, error: err },
       })
       // Rethrow the ORIGINAL error, not a message string: a caller must still be able to read `.stack`, test
