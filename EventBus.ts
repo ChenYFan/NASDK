@@ -28,7 +28,7 @@
 
 import { uid } from './utils/id.ts'
 
-type Sub = { id: string; cb: (p: any) => unknown; once: boolean }
+type Sub = { id: string; cb: (p: any, hitKey: string) => unknown; once: boolean }
 type Shape = { len: number; mask: boolean[] }   // mask[i] = true ⟺ that segment is '*'
 
 /**
@@ -57,10 +57,11 @@ export function readonlyView<T extends object>(target: T): T {
  *  forge events. `bus.readonly` returns one; holders re-export it (e.g. NACEB.eventBusObs). */
 export interface ReadonlyBus {
   /** Subscribe; returns the subscription id to pass to off(). The same cb may be registered many times —
-   *  each call is an independent subscription with its own id. */
-  listen(key: string, cb: (p: any) => void): string
+   *  each call is an independent subscription with its own id. `hitKey` is the concrete key that fired, which
+   *  is the only way a wildcard subscriber can tell which event it actually caught. */
+  listen(key: string, cb: (p: any, hitKey: string) => void): string
   /** Subscribe for one dispatch, then auto-remove. Returns an id too, for cancelling before it fires. */
-  listenOnce(key: string, cb: (p: any) => void): string
+  listenOnce(key: string, cb: (p: any, hitKey: string) => void): string
   /** await one event. With `cb`, its `this` is the emit-side thisArg (readonlyView for T-events, the bus
    *  otherwise) and its return value resolves the promise; a throw/rejection rejects it. Without `cb`,
    *  resolves with the payload. */
@@ -100,7 +101,7 @@ export class EventBus {
       this.shapes.push(shape)
   }
 
-  private add(key: string, cb: (p: any) => void, once: boolean): string {
+  private add(key: string, cb: (p: any, hitKey: string) => void, once: boolean): string {
     const pattern = key.split(':')
     const shape = this.shapeOf(pattern)
     this.registerShape(shape)
@@ -115,10 +116,10 @@ export class EventBus {
 
   /** Subscribe. Returns the subscription id — keep it to `off()` later. Registering the same cb twice
    *  yields two independent subscriptions (two ids), and both fire. */
-  listen(key: string, cb: (p: any) => void): string { return this.add(key, cb, false) }
+  listen(key: string, cb: (p: any, hitKey: string) => void): string { return this.add(key, cb, false) }
   /** Subscribe for exactly one dispatch, then auto-remove. The id is still returned so the subscription
    *  can be cancelled before it ever fires. */
-  listenOnce(key: string, cb: (p: any) => void): string { return this.add(key, cb, true) }
+  listenOnce(key: string, cb: (p: any, hitKey: string) => void): string { return this.add(key, cb, true) }
   /**
    * Await a single event. The optional `cb` runs with the SAME `this` as any other listener (the emit-side
    * thisArg — a readonlyView for T-events, this bus otherwise), and **its return value resolves the
@@ -171,6 +172,12 @@ export class EventBus {
    * NACEB/NACAB T-events pass `readonlyView(instance)` to override — the observer written as
    * `function(){ this.status }` reads state off the instance, symmetric with hook's `fn.call(instance)`.
    * Runtime events (no thisArg passed) default to EventBus as `this`. Errors stay isolated to onError.
+   *
+   * The callback's SECOND argument is the concrete key that fired. It exists for wildcard subscribers: a
+   * listener on `job:*` otherwise cannot tell `job:done` from `job:failed`, because the pattern it registered
+   * is all it has. Locally that is merely inconvenient; across a process boundary it is lost information, which
+   * is why NACP's notify carries both the subscribed pattern and the hit key — and it can only fill the latter
+   * because this argument exists.
    */
   emit(key: string, payload: any, thisArg?: any) {
     const parts = key.split(':')
@@ -185,7 +192,7 @@ export class EventBus {
     // Read-only observation: listener errors are isolated, never fed back to the state machine (P0-2).
     for (const { sub } of hit) {
       try {
-        const r = sub.cb.call(thisArg !== undefined ? thisArg : this, payload)
+        const r = sub.cb.call(thisArg !== undefined ? thisArg : this, payload, key)
         if (r && typeof (r as any).then === 'function') (r as Promise<any>).catch(e => this.onError(key, e))
       } catch (e) { this.onError(key, e) }
     }

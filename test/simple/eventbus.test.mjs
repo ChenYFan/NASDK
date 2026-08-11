@@ -58,15 +58,17 @@ test('通配符 *：一段一个星，订一整族事件', () => {
   assert.deepEqual(hits.sort(), ['done', 'failure'])
 })
 
-test('回调只收 payload 一个参数 —— 想知道命中了哪个具体事件，得让发送方写进 payload', () => {
+test('回调第二个参数是实际命中的 key —— 通配符订阅者靠它分辨catch到了什么', () => {
   const bus = new EventBus()
-  let argCount = -1
-  bus.listen('a:*', function (...args) { argCount = args.length })
-  bus.emit('a:b', { hi: 1 })
+  const hits = []
+  bus.listen('job:*', (payload, hitKey) => hits.push(hitKey))
 
-  // 这是刻意的取舍：跨进程转发时 key 会丢，所以 NACP 的 notify 把「订的名字」和「命中的名字」
-  // 都写进 meta（targetSubName / hitSubName），而不是依赖本地回调签名。
-  assert.equal(argCount, 1)
+  bus.emit('job:done', {})
+  bus.emit('job:failed', {})
+
+  // 只有模式的话分不出这两个。NACP 的 notify 因此在 meta 里同时带
+  // targetSubName（订的模式）和 hitSubName（命中的具体名），跨进程后者才不丢。
+  assert.deepEqual(hits, ['job:done', 'job:failed'])
 })
 
 test('asyncListenOnce：await 一个事件', async () => {

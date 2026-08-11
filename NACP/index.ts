@@ -47,7 +47,6 @@ export type {
   NappSuccessPayload,
   GatewaySuccessPayload, GatewayErrorPayload, GatewayWarningPayload,
   RegisterErrorPayload, ErrorMsgPayload,
-  EmitContext,
 } from './events.ts'
 
 export { NACPError, nacpInbound, nacpInternal, nacpOutbound } from './errors.ts'

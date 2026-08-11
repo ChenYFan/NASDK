@@ -45,7 +45,7 @@ import { PROTOCOL_V, buildMessage } from './types.ts'
 import { ListenTable, PeerAppConnectionTable, ResponsePendingTable, SubscribeTable } from './tables.ts'
 import {
   NACPInternal, callProcessName, callResponseName,
-  inboundEvent, outboundEvent, type EmitContext,
+  inboundEvent, outboundEvent,
 } from './events.ts'
 import { NACPError, nacpInbound, nacpOutbound } from './errors.ts'
 import { NACTEvent } from '../NACT/events.ts'
@@ -367,7 +367,16 @@ export class NACP {
         reject(nacpOutbound('timeout', `no response for ${msg.type} ${msg.id} within ${timeoutMs}ms`))
       }, timeoutMs)
       this.pendingTable.add(msg.id, { resolve, reject, timer: timer as ReturnType<typeof setTimeout>, destAppId })
-      this.outbound(msg)
+      // A packet that never left cannot be answered, so waiting for a response is waiting for nothing. This
+      // matters most for `request`, whose timeout is -1 by design (the framework has no idea how long a
+      // business call takes) — without this check a request to a mistyped or just-disconnected appId would hang
+      // forever rather than fail. The three ways it can fail (no-route / self-addressed / send-failed) are on
+      // `nacp:internal:route:error`; the rejection states only the fact, since one code per cause would push
+      // routing vocabulary into every caller's catch.
+      if (!this.outbound(msg)) {
+        this.pendingTable.settle(msg.id)
+        reject(nacpOutbound('not-sent', `${msg.type} ${msg.id} to '${msg.to}' was never sent — see nacp:internal:route:error`))
+      }
     })
   }
 
@@ -375,14 +384,13 @@ export class NACP {
    * The one bridge from a local bus hit to an outbound notify — shared by explicit subscribe and by the
    * responding side's auto-subscription, so both behave identically.
    *
-   * targetSubName is captured in the closure (known at subscribe time); hitSubName arrives via the emitter's
-   * thisArg, because a wildcard subscription cannot tell from its own pattern which concrete name fired.
+   * targetSubName is captured in the closure (known at subscribe time); hitSubName is EventBus's second
+   * callback argument, because a wildcard subscription cannot tell from its own pattern which concrete name
+   * fired.
    */
   private registerForwardingListener(parentId: string, subscriber: string, targetSubName: string): string {
-    const self = this
-    return this.napp.bus.listen(targetSubName, function (this: any, payload: any) {
-      const hitSubName: string = this?.hitSubName ?? targetSubName
-      self.notify(subscriber, { parentId, targetSubName, hitSubName, payload })
+    return this.napp.bus.listen(targetSubName, (payload: any, hitSubName: string) => {
+      this.notify(subscriber, { parentId, targetSubName, hitSubName, payload })
     })
   }
 
@@ -448,7 +456,11 @@ export class NACP {
       // down the inbound peerId rather than looking up msg.to.
       this.outbound(this.build('response', from, { parentId: msg.id, isOk: false, whyNotOk: reason }), { peerId })
       // Belt and braces: normally the rejected side reads whyNotOk and closes; if it misbehaves, we do.
-      setTimeout(() => { try { peer.close() } catch { /* already gone */ } }, RESPONSE_TIMEOUT_MS)
+      // `unref` so this never holds the process open: it is a defence against a peer that will not leave, and
+      // if we are exiting anyway the connection dies with us — the goal is met without the wait. Left
+      // fire-and-forget rather than tracked in a table, because a tracked timer would then need removing on
+      // fire too, and a defensive close is not worth that bookkeeping.
+      setTimeout(() => { try { peer.close() } catch { /* already gone */ } }, RESPONSE_TIMEOUT_MS).unref()
     }
 
     // register is internal traffic, so its fields live in the typed payload, not meta.
@@ -533,14 +545,11 @@ export class NACP {
     proc.push(
       { target: msg.meta.target ?? '', payload: msg.payload, reqId },
       {
-        onProcess: (chunk) => {
-          const name = callProcessName(kind, reqId)
-          // thisArg carries the concrete fired name so a wildcard subscriber can fill hitSubName.
-          this.napp.bus.emit(name, chunk, { hitSubName: name } satisfies EmitContext)
-        },
+        // No thisArg: the forwarding listener reads the concrete fired name off EventBus's second callback
+        // argument, so nothing has to be smuggled through `this`.
+        onProcess: (chunk) => { this.napp.bus.emit(callProcessName(kind, reqId), chunk) },
         onResponse: (result, isOk, whyNotOk) => {
-          const name = callResponseName(kind, reqId)
-          this.napp.bus.emit(name, { result, isOk, whyNotOk }, { hitSubName: name } satisfies EmitContext)
+          this.napp.bus.emit(callResponseName(kind, reqId), { result, isOk, whyNotOk })
           // The AutoSub's closing half rides this response's own outbound — see response().
           this.response(msg.from, { parentId: reqId, isOk, whyNotOk, kind, payload: result })
         },

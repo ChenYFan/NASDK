@@ -50,7 +50,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "node --experimental-strip-types --test \"test/*/*.test.mjs\"",
+    "test:simple": "node --experimental-strip-types --test \"test/simple/*.test.mjs\"",
+    "test:full": "node --experimental-strip-types --test \"test/full/*.test.mjs\"",
+    "test:edge": "node --experimental-strip-types --test \"test/edge/*.test.mjs\""
   },
   "dependencies": {
     "cbor-x": "^1.6.4",

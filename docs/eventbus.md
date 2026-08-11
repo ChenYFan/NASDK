@@ -41,12 +41,14 @@ a:inbound:*:event:*        — 五段且第三段为 event 时匹配
 
 ```ts
 interface ReadonlyBus {
-  listen(key: string, cb: (payload: any) => void): string
-  listenOnce(key: string, cb: (payload: any) => void): string
+  listen(key: string, cb: (payload: any, hitKey: string) => void): string
+  listenOnce(key: string, cb: (payload: any, hitKey: string) => void): string
   asyncListenOnce<R>(key: string, cb?: (this: any, payload: any) => R | Promise<R>): Promise<R>
   off(id: string): boolean
 }
 ```
+
+cb 的第二个参数 `hitKey` 是**本次实际命中的 key**。通配符订阅者只有它才能分清 `job:*` 这次是 `job:done` 还是 `job:failed`。
 
 ### `listen(key, cb)`
 

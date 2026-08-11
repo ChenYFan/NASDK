@@ -9,7 +9,7 @@ NACP 全称 Nyirusu Application Control **Protocol**，是NApp通讯协议层，
 
 在 Nyirusu Project 中，所有具有独立生命周期的应用（Core、Mem、Gateway，以及经 Gateway 接入的 QQ、Bash、OAIBridge、前端 Web）都被称为 Nyirusu Application，简称NApp。NApp之间的通讯均约定使用NACP。
 
-NACP 与 [NApp](../../../NyirusuDoc/napp-pre.md)、[NACT](./nact.md) 三者平行，同属 NASDK 直属成员：下有 NACT 收敛 ws/tcp/unix 收发与编解码，上有 NApp 门面作为用户配置入口。
+NACP 与 [NApp](./napp.md)、[NACT](./nact.md) 三者平行，同属 NASDK 直属成员：下有 NACT 收敛 ws/tcp/unix 收发与编解码，上有 NApp 门面作为用户配置入口。
 
 NACP 与 NACT 之间只用一对 JS API 交互，`nact.host.deliver -> nacp.inbound` 入站、`nacp.outbound -> nact.sendToPeer` 出站。
 
@@ -306,11 +306,11 @@ interface AbilityProcessor extends Processor {         // 仅 ability 侧
 
 **命名约定：App 自建的能力一律以 `NApp.` 开头**，将来的 `NApp.stat` / `NApp.peers` 同理。这只是命名空间，不是保留字——见下。
 
-**NACP 完全不参与**。它不造这些能力、不注入、也不知道有这回事——`onRequest` 里没有任何特例分支。是 **NApp 在装配时通过 `AbilityProcessor.register` 把自己的能力注册进去**，走的和用户注册能力完全同一条路径。详见 [napp-pre.md](../../../NyirusuDoc/napp-pre.md)。
+**NACP 完全不参与**。它不造这些能力、不注入、也不知道有这回事——`onRequest` 里没有任何特例分支。是 **NApp 在装配时通过 `AbilityProcessor.register` 把自己的能力注册进去**，走的和用户注册能力完全同一条路径。详见 [napp.md](./napp.md)。
 
 对处理器而言，这就是一次普通注册：
 
-- **没有特权层、没有保留字、没有旁路**。`NApp.` 只是命名空间，不做任何检查也不做任何保护。注册是后写入者胜，和普通 map 一致——这些是 App 提供的便利，不是需要防卫的协议保证。覆盖时机见 [napp-pre.md](../../../NyirusuDoc/napp-pre.md)。
+- **没有特权层、没有保留字、没有旁路**。`NApp.` 只是命名空间，不做任何检查也不做任何保护。注册是后写入者胜，和普通 map 一致——这些是 App 提供的便利，不是需要防卫的协议保证。覆盖时机见 [napp.md](./napp.md)。
 - **处理器只有一张表**。App 注册的和用户注册的落在同一张表、走同一条查找，处理器分辨不出来，也没有「内建」这个概念。
 - **自动进声明**：它在 `list()` 输出里，因此对端 register 一次就知道有哪些可查，无需额外发现机制。
 - **结果落 payload**：它是 ability 的返回值，走 `onResponse` → response payload。回 register 的那条 response 也把 `decl` 放在 payload（`RegisterResponsePayload`）—— 同一个 `buildDecl()` 数据源，两个消费场景都走 payload，不再有「一个走 meta 一个走 payload」的不对称。
@@ -351,7 +351,7 @@ interface ResponseMeta extends BaseMeta {
 interface ResponsePayload             extends BasePayload {}      // response 族的根，自己也是一个 XxxPayload
 interface RegisterResponsePayload    extends ResponsePayload, RegisterPayload {}   // 同构：register 是对称交换
 interface UnregisterResponsePayload  extends ResponsePayload {}
-interface SubscribeResponsePayload   extends ResponsePayload {}
+interface SubscribeResponsePayload   extends ResponsePayload { targetSubId: string }
 interface UnsubscribeResponsePayload extends ResponsePayload {}
 
 type ResponsePayloadUnion =
@@ -373,7 +373,7 @@ interface UnsubscribePayload { targetSubId: string }
 
 interface RegisterResponsePayload    extends RegisterPayload {}   // 同构，不重抄字段
 interface UnregisterResponsePayload  {}
-interface SubscribeResponsePayload   {}
+interface SubscribeResponsePayload   { targetSubId: string }   // = subId，退订时原名传回
 interface UnsubscribeResponsePayload {}
 ```
 
@@ -417,7 +417,7 @@ NACP在接收到Response信号时，会认为对应的操作已结束，并执�
 |---|---|---|---|
 | `register` | `RegisterResponsePayload` | T | 同 `RegisterPayload = { isGateway, decl, record? }` |
 | `unregister` | `UnregisterResponsePayload` | T | `{}` |
-| `subscribe` | `SubscribeResponsePayload` | T | `{}` |
+| `subscribe` | `SubscribeResponsePayload` | T | `{ targetSubId }` |
 | `unsubscribe` | `UnsubscribeResponsePayload` | T | `{}` |
 | `request` | `UnknownPayload` | F | 业务结果，opaque |
 
@@ -444,7 +444,9 @@ NACP在接收到Response信号时，会认为对应的操作已结束，并执�
 
 两类拒绝最终都汇到 `NACP.register()` 内部的 `fail()` 闭包，由它统一 emit `nacp:internal:register:error`、`dropAppId(to)` 回滚绑定、`peer.close()` 关连接，并返回 `false`。回滚用的是 `dropAppId` 而不是「回滚 `bindAppId`」。
 
-> `request` 的超时是 `-1`（永不超时）——业务调用耗时框架无从预估。其余四种是 10s：它们是协议握手，必须快。两个值都是模块顶层硬编码常量，不可配置。 -->
+> `request` 的超时是 `-1`（永不超时）——业务调用耗时框架无从预估。其余四种是 10s：它们是协议握手，必须快。两个值都是模块顶层硬编码常量，不可配置。
+>
+> 「永不超时」只针对**已经发出去**的请求。如果这一包压根没能出站（no-route / self-addressed / send-failed），等待方立刻 reject，code 为 `not-sent` —— 发不出去的包不会有回包，等下去就是永久挂住。 -->
 
 
 ### subscribe
@@ -723,7 +725,7 @@ NACP 触发的事件以`nacp:`开头，主要分为下面的方式
 | `nacp:event:{reqId}:response` | event 返回结果 | `{ result, isOk, whyNotOk }` |
 | `nacp:ability:{reqId}:response` | ability 返回结果 | `{ result, isOk, whyNotOk }` |
 
-emit 调用族事件时会传一个 `thisArg`，内容是 `{ hitSubName }`，即本次实际命中的具体名字。通过通配订阅的监听者可以通过`hitSubName`读取实际命中的消息。
+通配订阅的监听者靠 EventBus 回调的第二个参数（本次实际命中的 key）填 `hitSubName`，从而知道命中的是哪一个具体名字。
 
 ### 内部族
 

@@ -114,9 +114,3 @@ export interface RegisterErrorPayload { fromPeerId: NACTPeerId; from: string; re
 /** The shape shared by request / response / route / notify / subscribe errors. */
 export interface ErrorMsgPayload { msg: NACPMessage; reason: string }
 
-/**
- * The `thisArg` NACP passes when emitting a call-entity event. A wildcard subscriber knows the pattern it
- * subscribed but not which concrete name fired; EventBus hands `thisArg` to the listener as its `this`, so
- * the concrete name rides there and the listener can fill NotifyMeta.hitSubName.
- */
-export interface EmitContext { hitSubName: string }

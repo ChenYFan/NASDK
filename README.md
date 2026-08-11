@@ -1,12 +1,20 @@
-# NASDK
+<div align="center">
+  <img src="./docs/NASDK.png" alt="NASDK" width="160">
+  <h1>NASDK</h1>
+</div>
 
-Nyirusu Application Software Development Kit，一套**通用的**长时**资源有限**任务调度与应用间通讯框架。
+Nyirusu Application Software Development Kit 是一套**通用的**长时**资源有限**任务调度与多应用间通讯框架。
 
 NASDK被设计出来解决这样一类问题：一个任务要跑很长时间、中途要上报内容、可能被取消、还要和别的任务抢同一份资源，同时这些任务可能分散在多个独立进程里，彼此要能互相调用、互相订阅。
 
-NASDK通过区分有过程流的Event事件和简单能力Ability，通过一套**简单的**状态机控制和全局资源占用声明来完成前者任务。同时通过一套JSON-RPC与CBOR二进制编码、允许通过TCP/UnixSocket/WebSocket传输的协议格式来统一后者。
+NASDK 将系统拆成两个相互独立的部分：
 
-NASDK统一了任务具体执行与通讯过程，不在区分能力上的Client/Server，并**允许Web浏览器**使用同一套标准的交互方式来实现事件处理和通讯。
+- NACP + NACT：使用 `RPC-style` 消息协议和 CBOR 二进制承载，统一 TCP、Unix Socket 与 WebSocket 上的 App 间通信；
+- NACEB + NACAB：分别处理有过程流的 Event 和一次性请求响应 Ability。其中 NACEB 通过**简单状态机**和**占用资源类**对单个 NACEB 实例内的独占资源进行统一调度。
+
+NASDK统一了任务具体执行与通讯过程，不再区分能力上的Client/Server，并**允许Web浏览器**使用同一套标准的交互方式来实现事件处理和通讯。
+
+NASDK 是可信多 App 环境下的轻量通信 Fabric，并承载有限资源工作流调度器的需求。
 
 <details>
 
@@ -16,7 +24,7 @@ NASDK统一了任务具体执行与通讯过程，不在区分能力上的Client
 
 但是当任务变多、变复杂时，这一解决方法变得极其脆弱，你要在每个资源占用任务前给自己加锁，并且加锁类型也会变得复杂。此时你很可能需要一个队列来维持所有资源占用任务，并通过信号告知任务执行时机。
 
-NASDK确实脱胎于Nyirusu Project，一个本地LLM Agentic Runtime。但是设计上，**NASDK 不是 AI SDK。**
+NASDK确实脱胎于Nyirusu Project，一个本地LLM Agentic Runtime。但是设计上，**NASDK 不是 AI SDK。**NASDK 不包含任何 LLM、模型、Token 或 ToolCall 语义；这些能力由构建在其上的 NAISDK 提供。
 
 它没有 prompt、没有 model、没有 token、没有 tool calling，没有任何 AI 语义。设计上它确实很适合承载 LLM 应用（流式输出、可中断、GPU 独占、多轮工具调用都是它的原生场景）。
 
@@ -37,7 +45,7 @@ NASDK确实脱胎于Nyirusu Project，一个本地LLM Agentic Runtime。但是�
 - 直接将NApp.bus作为EventEmitter，能够在上面发送自定义消息，并且能够直接在另一个NApp上远程订阅。
 - 使用NACEB来托管资源占用型任务，比如llama.cpp的textCompletion，并且能在另一个NApp发起请求远程调用。
 - 使用NACEB来作为AI应用中的ToolCall部分，能够直接暴露能力与简介，并提供了海量观测事件和Hook用于监听和介入。
-- 在一个任务执行期间能够远程终止一个任务的执行，在允许的情况下甚至能够远程重试子任务。
+- 在一个任务执行期间能够远程取消一个任务的执行，在允许的情况下甚至能够远程重试子任务。
 - 一个任务执行期间可以触发构建子任务SubEvent，并且能够选择并发还是阻塞等待结果。
 - NACEB被设计为流水线方式，你可以轻松编写对应的PipelineHandler来完成复杂的任务调用。
 - NApp完全可以运行在用户网页中，并且可以直接把事件和能力放在用户浏览器上处理。除了不能自行启动Server和必须用WebSocket来连接到另一个NApp，和普通NApp没有差异。
@@ -64,7 +72,7 @@ NASDK 把一次远程调用分成两类，区别只有一处，**要不要过程
 
 | | Event | Ability |
 |---|---|---|
-| 形态 | 多步骤、有生命周期、可暂停可取消 | 一次调用、无状态、瞬时 |
+| 形态 | 多步骤、有生命周期、可暂停可取消 | 一次调用、无状态、可能被大量并发 |
 | 回包 | 1 条 response + 0~N 条过程 notify | 1 条 response |
 | 资源分配 | 会互相争抢 | 不会 |
 | 默认处理器 | NACEB | NACAB |
@@ -77,7 +85,7 @@ NACEB 的通过区分**BlockedTask**和**AsyncTask**，并在前者通过`busyKe
 
 每一次状态转移都可观测（EventBus）、可介入（Hook）、可否决（Veto）。
 
-## 构件一个NApp应用
+## 构建一个NApp应用
 
 ### 安装
 
@@ -135,6 +143,15 @@ class TranslationPipe extends PipelineHandler {
     this.state.summarized = true
     return { task: 'summaryCompletion', input: this.state.done }
   }
+}
+
+const llm = {       //Demo Function
+  async *textCompletionStream(text) {
+    yield `[translated] ${text}`
+  },
+  async textCompletion(text) {
+    return `[summary] ${text}`
+  },
 }
 
 class Collatz extends AbilityHandler {
@@ -213,6 +230,14 @@ const res = await app.request('ai-core', {
 - [NACEB](./docs/naceb.md) —— NASDK 默认有状态的事件处理机，讲述资源竞争、Hook字段、Veto 与 SubEvent。
 - [NACAB](./docs/nacab.md) —— NASDK 默认无状态的能力处理机，讲述具体字段和实现。
 - [EventBus](./docs/eventbus.md) —— NASDK 自带的事件总线，提供本地通配符订阅与异步订阅。
+
+## 注意
+
+- NASDK完全没有设计鉴权系统，我们在设计时就认为，所有连接进来的 App 都可信。因此，请不要直接把通讯入口挂载在公网上！
+- NASDK/NACP从来没有设计为持久化消息队列形式，虽然NASDK提供了有限的消息队列缓存和中继支持，但不保证断线重连能否有效。
+- NACEB暂时没有设计为分布式协调，他不能自动协调两个NApp的资源占用。这一部分问题将在接下来的版本中解决。
+- NACAB和NACEB的AsyncTask被设计为绝对能够并发启动，没有设置上限。
+
 
 ## License
 

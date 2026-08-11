@@ -9,7 +9,7 @@ NACT 全称 Nyirusu Application Control **Transparent**，是NASDK中的传输�
 
 NACT的存在意义就是抹平 ws、tcp、unix 三种传输协议的差异，把它们变成一套统一的 JS 出入站接口，统一一套API给协议层(NACP)使用。
 
-NACT 与 [NACP](./nacp.md)、[NApp](../../../NyirusuDoc/napp-pre.md) 三者平行，同属 NASDK 直属成员。
+NACT 与 [NACP](./nacp.md)、[NApp](./napp.md) 三者平行，同属 NASDK 直属成员。
 
 
 
@@ -29,13 +29,11 @@ NACT 与 [NACP](./nacp.md)、[NApp](../../../NyirusuDoc/napp-pre.md) 三者平�
 
 **唯一职责**：把 ws / tcp / unix 的收发、连接生命周期、出入站编解码，统一成 Peer 抽象。
 
-几条硬约束：
 
-- **不解读消息语义**。整条消息在 NACT 看来就是一个大对象，它按 CBOR 把对象编码成字节发出去、把字节解码回对象交上去，全程不知道任何字段是什么意思。能遍历打包不等于解读语义。
-- **不做鉴权**。Peer 接口只有 `id` / `send` / `close` / `terminate?`，不带 appId、不带用户身份。准入是 Gateway/App 的业务。
-- **C/S 在此抹平**。`listen`——被连——和 `dial`——主动连——只是建 peer 的两条路，建完之后 peer 语义完全一致，谁是 C 谁是 S 封死在建连那一刻，上层只剩 peerId。
+NACT不会解读具体含义，整条消息在 NACT 看来就是一个大对象，它按 CBOR 把对象编码成字节发出去、把字节解码回对象交上去，全程不知道任何字段是什么意思。能遍历打包不等于解读语义。
+NACT不会做任何鉴权。Peer 接口只有 `id` / `send` / `close` / `terminate?`，不带 appId、不带用户身份。准入是 Gateway/App 的业务。
+NACT区分Client/Server，但提供给上层的语义不再区分，是全双工的。`listen`被连和 `dial`主动连只是构建 peer 的两条路，建完之后 peer 语义完全一致。
 
--->
 
 ## 传输协议
 
@@ -108,7 +106,7 @@ chunkSize 是本地发送策略、不协商，默认 unix 极大值不分片、t
 
 ## 与 NACP 交互
 
-NACT 对上暴露统一 Peer，收发的是对象：
+NACT 对上暴露统一 Peer，格式如下：
 
 ```ts
 interface Peer {
