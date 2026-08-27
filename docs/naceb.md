@@ -18,7 +18,7 @@ NACEB不负责理解事件内容，也不负责定义业务流程；因此，它
 
 NACEB对payload应该是opaque的，换句话说不应该关注负载的内容，只能机械丢给对应的Pipeline。Pipeline内则没有限制。
 
-NACEB一般是NACP的Event直接下游，详情见.nacpAdaptor章节。
+NACEB 一般是 NACP 的 Event 直接下游，详情见 `nacpAdaptor` 章节。
 
 NACEB将所有 Task 分为 BlockedTask 与 AsyncTask，以允许一部分任务不占用任何资源，并发执行。
 
@@ -450,6 +450,15 @@ TaskHandler不关心事件、Pipeline、状态机、队列、资源占用等问�
 
 如果设置了busyKeys，TaskHandler会被视为BlockedTask，否则是AsyncTask。BlockedTask会占用对应Lane资源，AsyncTask不会。
 
+如果设置了`payloadSchema`（一个 zod schema），NACEB会在派发这个Task之前先校验流入的`input`是否符合该形状——也就是上游PipelineHandler的`next()`所返回的`step.input`。这解决的是「Pipeline把上一步的结果传给下一步时，形状不对」这类问题：不合规的输入在**TaskInstance被创建之前**就被拦下，抛出`bad-task-input`，随后按既有路径变成 pipeline failure → event failure。
+
+`payloadSchema`是可选的，**不填即视为无约束**，该Task的输入完全不校验。
+
+payloadSchema只判断校验。通过后，`execute()`拿到的仍然是**原始的`input`**，而不是zod解析后的输出。因此：
+
+- 输入里多出来的字段会**原样保留**（多余字段同样视为无约束），不会被zod strip掉；
+- 正因为解析结果被丢弃，schema里写的`.default()` / `.coerce` / `.transform()`**不会生效**。如果需要默认值或类型转换，请在`execute()`内部自己处理。
+
 abortSignal 由 **TaskInstance** 持有（`TaskInstance.abort = new AbortController()`，对外暴露 `get abortSignal()`）。Handler 是注册表里共享复用的无状态逻辑，不可能持有某一次执行的 AbortSignal；但因为 `execute()` 的 `this` 被绑定到本次的 TaskInstance，所以在编写具体的 execute 逻辑时照样直接写 `this.abortSignal` 来判断是否被外部中止，并提前终止自己内部逻辑。
 
 > NACEB TaskHandler的终止被设计为协商式的，也就是说，TaskHandler内部的execute逻辑必须自己判断abortSignal是否被激活，并在适当时机终止自己的逻辑。NACEB不会强制中止正在执行的TaskHandler。
@@ -484,6 +493,7 @@ class TextCompletionTask extends TaskHandler {
   name = 'LLM Text Completion'
   description = '大语言模型文本补齐'
   busyKeys = ['gpu'] //指定了busyKey，表示这个任务会占用llm lane资源。lane资源是全局唯一的，所有指定了同一个busyKey的任务都共享同一个lane资源。被占用的lane资源会阻塞其他同busyKey的任务，直到本任务完成。
+  payloadSchema = z.object({ prompt: z.string() }) //可选。上游 next() 给的 input 必须有 string 类型的 prompt，否则事件直接 failure，不会跑到 execute。多余的字段不管，会原样传进来。
   async execute() {
     for await (const delta of llm.stream(this.input.prompt)) {
       if (this.abortSignal.aborted) return        // TaskHandler

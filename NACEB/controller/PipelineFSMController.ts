@@ -7,7 +7,7 @@
  */
 
 import { PIPELINE_TRANSITIONS, cap, TERMINAL } from '../types.ts'
-import type { PipelineStatus, PipelineStep, PipelineHandler, HookFn, NACEBPrivateRef } from '../types.ts'
+import type { PipelineStatus, PipelineStep, PipelineHandler, NormalSignal, HookFn, NACEBPrivateRef } from '../types.ts'
 import type { NACEB } from '../NACEB.ts'
 import type { TaskFSMController, TaskInstance } from './TaskFSMController.ts'
 import type { EventInstance } from '../instance/EventInstance.ts'
@@ -34,9 +34,13 @@ export class PipelineFSMController {
     return p
   }
   getByEventId(eventId: string): PipelineInstance | null { return this.queue.find(p => p.event.id === eventId) ?? null }
-  /** 入参是 eventId（pipeline 按 event 单射，一个 event 至多一条 pipeline）。 */
+  /** Takes an eventId (pipeline is injective per event — an event has at most one pipeline). */
   getStatus(eventId: string) { return this.getByEventId(eventId)?.status ?? null }
   removeByEventId(eventId: string) { const i = this.queue.findIndex(p => p.event.id === eventId); if (i >= 0) this.queue.splice(i, 1) }
+
+  async normalSIG(p: PipelineInstance, signal: NormalSignal): Promise<void> {
+    await p._onNormalSIG(signal)
+  }
 
   getCurrentTaskKind(eventId: string): 'blocked' | 'async' | null {
     const p = this.getByEventId(eventId); if (!p || !p.currentTaskId) return null
@@ -53,13 +57,13 @@ export class PipelineFSMController {
       if (t.status !== 'done' && t.status !== 'stopped' && t.status !== 'failure') continue
       if (t.status === 'done') {
         const result = t.consume(); p.currentTaskId = null
-        // TERMINAL done → pipeline done（既成回收，_transition 内建终局保护兜 hook 抛出）。非 TERMINAL → 派下一个 task。
+        // TERMINAL done → pipeline done (consumed already; _transition's internal terminal guard shields a throwing hook). Non-TERMINAL → dispatch the next task.
         if (t.name === TERMINAL) await p._transition('done', [() => { p.result.final = result }])
         else await p._next(result)
       } else if (t.status === 'stopped') {
         await p._transition('paused')
       } else {
-        // task failure → pipeline failure（既成回收）：consume 掉 task（取 {error}）+ 写 final，_transition 内建保护兜 hook 抛出。
+        // task failure → pipeline failure (consumed): consume the task ({error}) + write final; _transition's internal guard shields a throwing hook.
         await p._transition('failure', [() => { p.result.final = t.consume(); p.currentTaskId = null }])
       }
       moved = true

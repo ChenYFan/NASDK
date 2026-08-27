@@ -7,7 +7,7 @@
  */
 
 export { NApp } from './NApp.ts'
-export type { NAppOpts } from './types.ts'
+export type { NAppOpts, AbilityRequestHandle, EventRequestHandle } from './types.ts'
 export { NAppError, nappInbound, nappInternal, nappOutbound } from './errors.ts'
 
 // the `napp:` observation surface — one name today (a subscribe stream dropped a buffered notify)

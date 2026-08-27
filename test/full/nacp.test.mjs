@@ -24,7 +24,7 @@ async function bound(id = 'me', { answer = true, opt } = {}) {
 
 // ── 信封构造 ──
 
-test('七族消息都能构造，v/id/t/from 一律齐全', async () => {
+test('出站消息都能构造，v/id/t/from 一律齐全', async () => {
   const { app, sent, stop } = await bound()
 
   app.nacp.notify('them', { parentId: 'p', targetSubName: 'a', hitSubName: 'a' })
@@ -32,7 +32,7 @@ test('七族消息都能构造，v/id/t/from 一律齐全', async () => {
   app.nacp.subscribe('them', 'x:*', () => {})
   app.nacp.unsubscribe('them', 'sub-1')
   app.nacp.unregister('them').catch(() => {})
-  app.nacp.request('them', { kind: 'ability', target: 't' }).catch(() => {})
+  app.nacp.request('them', { kind: 'ability', target: 't' }).response.catch(() => {})
 
   const byType = Object.fromEntries(sent.map(m => [m.type, m]))
   for (const [type, m] of Object.entries(byType)) {
@@ -91,12 +91,12 @@ test('出站三种失败各有 reason，都返 false', async () => {
   const app = await startBare('me')
   const errs = collect(app.bus, 'nacp:internal:route:error')
 
-  assert.equal(app.nacp.notify('陌生人', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
-  assert.equal(app.nacp.notify('me', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
+  assert.equal(await app.nacp.notify('陌生人', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
+  assert.equal(await app.nacp.notify('me', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
 
   // send-failed：appId 绑到一个不在 peer 表里的 peerId
   app.nacp.bindAppId('ghost', 'peer-不存在')
-  assert.equal(app.nacp.notify('ghost', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
+  assert.equal(await app.nacp.notify('ghost', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
   // 解绑：否则 terminate 会给这个不存在的 peer 发 unregister，白等满 10s 超时
   app.nacp.dropAppId('ghost')
 
@@ -115,11 +115,11 @@ test('出站事件先发、再做副作用 —— 失败的尝试也可观测', 
   await app.terminate()
 })
 
-test('notify / response 返回布尔就是「有没有交给 NACT」', async () => {
+test('notify 等出站，response 等 ACK', async () => {
   const { app, stop } = await bound()
-  assert.equal(app.nacp.notify('them', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), true)
-  assert.equal(app.nacp.response('them', { parentId: 'x', isOk: true }), true)
-  assert.equal(app.nacp.notify('没人', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
+  assert.equal(await app.nacp.notify('them', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), true)
+  assert.equal(await app.nacp.response('them', { parentId: 'x', isOk: true }), true)
+  assert.equal(await app.nacp.notify('没人', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
   await stop()
 })
 
@@ -138,12 +138,15 @@ test('register 成功：建表 + 对称应答（带自己的 decl 和 isGateway�
   ok.stop()
   assert.deepEqual(ok.events.map(e => e.payload.reason), ['bound'])
 
-  const ack = sent.find(m => m.type === 'response')
-  assert.equal(ack.meta.isOk, true)
-  assert.equal(ack.meta.parentId, 'r1')
-  assert.equal(typeof ack.payload.isGateway, 'boolean')
-  assert.ok(Array.isArray(ack.payload.decl.events), '一个往返换完能力声明')
-  assert.ok(Array.isArray(ack.payload.decl.abilities))
+  const receipt = sent.find(m => m.type === 'ack')
+  assert.equal(receipt.meta.parentId, 'r1', 'register 通过入站 peer 直接 ACK')
+  assert.ok(!('payload' in receipt), 'ACK 信封没有 payload')
+  const response = sent.find(m => m.type === 'response')
+  assert.equal(response.meta.isOk, true)
+  assert.equal(response.meta.parentId, 'r1')
+  assert.equal(typeof response.payload.isGateway, 'boolean')
+  assert.ok(Array.isArray(response.payload.decl.events), '一个往返换完能力声明')
+  assert.ok(Array.isArray(response.payload.decl.abilities))
   await app.terminate()
 })
 
@@ -351,7 +354,7 @@ test('没有路由时出站兜底走 Gateway', async () => {
   sg.length = 0
 
   // 'unknown' 没绑过，应该落到 Gateway 那条链路上
-  assert.equal(app.nacp.notify('unknown', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), true)
+  assert.equal(await app.nacp.notify('unknown', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), true)
   assert.equal(sg.find(m => m.type === 'notify')?.to, 'unknown', '包原样交给 Gateway，to 不变')
   await app.terminate()
 })
@@ -375,12 +378,12 @@ test('unregister 进来：先回话再清理（清理会拆掉回话用的路由
   await subAck
 })
 
-test('断连清四张表里属于该 peer 的部分', async () => {
+test('意外断连进入宽限期，协议状态与等待方保留', async () => {
   const { app, peer, stop } = await bound()
 
   const subAck = app.nacp.subscribe('them', 'x:*', () => {})?.catch(e => e)       // ListenTable
   app.nacp.inbound(msg('subscribe', { from: 'them', to: 'me', id: 's1', payload: { targetSubName: 'mine:*' } }), peer)  // SubscribeTable
-  const pending = app.nacp.request('them', { kind: 'ability', target: 't' }).catch(e => e)  // PendingTable
+  const pending = app.nacp.request('them', { kind: 'ability', target: 't' }).response.catch(e => e)  // PendingTable
   assert.equal(app.nacp.getListenCount(), 1)
   assert.equal(app.nacp.getSubCount(), 1)
   // pending 表装的是「所有在等应答的出站消息」，不只是 request —— 这里 subscribe 和 request 各占一条。
@@ -389,26 +392,26 @@ test('断连清四张表里属于该 peer 的部分', async () => {
 
   app.bus.emit('nact:peer:disconnect', { peerId: 'p1' })   // 物理断连
 
-  assert.equal(app.nacp.checkAppId('them'), false)
-  assert.equal(app.nacp.getListenCount(), 0)
-  assert.equal(app.nacp.getSubCount(), 0)
-  assert.equal(app.nacp.getPendingCount(), 0, '在途请求被失败掉')
-  assert.ok((await pending) instanceof Error, '等待方收到失败')
-  await subAck
+  assert.equal(app.nacp.checkAppId('them'), true, '宽限期内仍记得这个 appId')
+  assert.deepEqual(app.nacp.listOnlineAppId(), [], '但不再报告为在线')
+  assert.equal(app.nacp.getListenCount(), 1)
+  assert.equal(app.nacp.getSubCount(), 1)
+  assert.equal(app.nacp.getPendingCount(), 2, '等待方留到重连或宽限到期')
   await stop()
+  assert.ok((await pending) instanceof Error)
+  await subAck
 })
 
-test('断连时对端在我 bus 上挂的监听器要摘掉', async () => {
-  const { app, peer, stop } = await bound()
+test('断连宽限期保留对端订阅，过程通知进入 backlog', async () => {
+  const { app, peer, sent, stop } = await bound()
   app.nacp.inbound(msg('subscribe', { from: 'them', to: 'me', id: 's1', payload: { targetSubName: 'mine:*' } }), peer)
 
   app.bus.emit('nact:peer:disconnect', { peerId: 'p1' })
 
-  // 断连后再 emit 不该产生 notify（监听器已 off）
-  const out = collect(app.bus, 'nacp:outbound:notify')
+  const before = sent.length
   app.bus.emit('mine:hello', { v: 1 })
-  out.stop()
-  assert.equal(out.events.length, 0, '监听器已摘，不会再往一条死链路上发')
+  assert.equal(app.nacp.getSubCount(), 1, '订阅留待重连恢复')
+  assert.equal(sent.length, before, '离线时不碰已经断开的物理链路')
   await stop()
 })
 
@@ -536,7 +539,7 @@ test('没有 Processor 的 kind → 立刻拒，报 no-processor', async () => {
 
 test('response 进来：settle 对应的 pending', async () => {
   const { app, peer, sent, stop } = await bound()
-  const p = app.nacp.request('them', { kind: 'ability', target: 't' })
+  const p = app.nacp.request('them', { kind: 'ability', target: 't' }).response
   const req = sent.find(m => m.type === 'request')
   assert.equal(app.nacp.getPendingCount(), 1)
 
@@ -552,7 +555,7 @@ test('response 进来：settle 对应的 pending', async () => {
 
 test('isOk=false 的 response 让 request reject，code 是 response-not-ok', async () => {
   const { app, peer, sent, stop } = await bound()
-  const p = app.nacp.request('them', { kind: 'ability', target: 't' })
+  const p = app.nacp.request('them', { kind: 'ability', target: 't' }).response
   const req = sent.find(m => m.type === 'request')
 
   app.nacp.inbound(msg('response', {
@@ -583,7 +586,7 @@ test('event 请求自动建本地订阅，subId 就是 reqId', async () => {
   const { app, peer, sent, stop } = await bound()
   assert.equal(app.nacp.getListenCount(), 0)
 
-  const p = app.nacp.request('them', { kind: 'event', target: 'e', onProcess: () => {} }).catch(() => {})
+  const p = app.nacp.request('them', { kind: 'event', target: 'e', onProcess: () => {} }).response.catch(() => {})
   const req = sent.find(m => m.type === 'request')
 
   assert.equal(app.nacp.getListenCount(), 1, 'AutoSub 的本地半条')
@@ -603,7 +606,7 @@ test('event 请求自动建本地订阅，subId 就是 reqId', async () => {
 
 test('ability 请求不建订阅 —— 能力没有过程流', async () => {
   const { app, stop } = await bound()
-  const p = app.nacp.request('them', { kind: 'ability', target: 'a', onProcess: () => {} }).catch(() => {})
+  const p = app.nacp.request('them', { kind: 'ability', target: 'a', onProcess: () => {} }).response.catch(() => {})
   assert.equal(app.nacp.getListenCount(), 0)
   await stop()
   await p
@@ -611,7 +614,7 @@ test('ability 请求不建订阅 —— 能力没有过程流', async () => {
 
 test('event 请求即使不给 onProcess 也建订阅 —— 对端只看 kind', async () => {
   const { app, stop } = await bound()
-  const p = app.nacp.request('them', { kind: 'event', target: 'e' }).catch(() => {})
+  const p = app.nacp.request('them', { kind: 'event', target: 'e' }).response.catch(() => {})
   assert.equal(app.nacp.getListenCount(), 1, '否则对端会往一个没建的订阅上发 notify')
   await stop()
   await p
@@ -619,7 +622,7 @@ test('event 请求即使不给 onProcess 也建订阅 —— 对端只看 kind',
 
 test('event 的 response 到达时自动撤掉 AutoSub', async () => {
   const { app, peer, sent, stop } = await bound()
-  const p = app.nacp.request('them', { kind: 'event', target: 'e', onProcess: () => {} })
+  const p = app.nacp.request('them', { kind: 'event', target: 'e', onProcess: () => {} }).response
   const req = sent.find(m => m.type === 'request')
   assert.equal(app.nacp.getListenCount(), 1)
 
@@ -638,7 +641,7 @@ test('terminate 清空四张表并失败所有等待者', async () => {
   const { app, peer, stop } = await bound()
   const subAck = app.nacp.subscribe('them', 'x:*', () => {})?.catch(() => {})
   app.nacp.inbound(msg('subscribe', { from: 'them', to: 'me', id: 's1', payload: { targetSubName: 'mine:*' } }), peer)
-  const pending = app.nacp.request('them', { kind: 'ability', target: 't' }).catch(e => e)
+  const pending = app.nacp.request('them', { kind: 'ability', target: 't' }).response.catch(e => e)
 
   app.nacp.terminate()
 

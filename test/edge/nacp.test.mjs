@@ -19,8 +19,8 @@ import {
 const SLOW = !!process.env.NASDK_SLOW
 
 /** 一个绑好 fakePeer 的裸 App：peerId 已入 NACP 的 appId 表，可以直接收发。 */
-async function bound(id = 'me', peerName = 'p1') {
-  const app = await startBare(id)
+async function bound(id = 'me', peerName = 'p1', opt) {
+  const app = await startBare(id, opt)
   const { peer, sent } = fakePeer(app, peerName)
   app.nact.addPeer(peer)
   app.nacp.inbound(registerMsg({ from: 'them', to: id, id: 'reg-1' }), peer)
@@ -36,7 +36,7 @@ test('5000 条并发 request：每条回包各归各位，不串号', async () =
   const N = 5000
 
   const [results, ms] = await timed(() => Promise.all(
-    Array.from({ length: N }, (_, i) => cli.request('srv', { kind: 'ability', target: 'add', payload: { a: i, b: 0 } })),
+    Array.from({ length: N }, (_, i) => cli.request('srv', { kind: 'ability', target: 'add', payload: { a: i, b: 0 } }).response),
   ))
   // 回值等于自己的入参 —— 这是「pending 表没把回包交错」的直接证据
   assert.deepEqual(results.map(r => r.payload), Array.from({ length: N }, (_, i) => i))
@@ -45,13 +45,13 @@ test('5000 条并发 request：每条回包各归各位，不串号', async () =
   await stop()
 })
 
-test('5000 条 pending 挂着时断连：全部一次性 reject，表清空', async () => {
-  const { app, peer } = await bound('cli-many')
+test('5000 条 pending 挂着时断连：宽限期后全部 reject，表清空', async () => {
+  const { app, peer } = await bound('cli-many', 'p1', { reconnectGraceMs: 20 })
   const N = 5000
 
   // fakePeer 不答 request（只答四种握手），所以这些会一直挂着
   const pendings = Array.from({ length: N }, (_, i) =>
-    app.nacp.request('them', { kind: 'ability', target: 't', payload: { i } }).catch(e => e))
+    app.nacp.request('them', { kind: 'ability', target: 't', payload: { i } }).response.catch(e => e))
   await sleep(50)
   assert.equal(app.nacp.getPendingCount(), N, `${N} 条挂在表里`)
 
@@ -63,7 +63,7 @@ test('5000 条 pending 挂着时断连：全部一次性 reject，表清空', as
 
   assert.equal(errs.length, N)
   assert.ok(errs.every(e => e instanceof NACPError), '每条都是 NACPError')
-  assert.ok(errs.every(e => e.code === 'peer-gone'), '理由都是 peer-gone')
+  assert.ok(errs.every(e => e.code === 'peer-gone'), '宽限到期后理由都是 peer-gone')
   assert.equal(app.nacp.getPendingCount(), 0, '一条不留')
   console.log(`    ${N} 条 pending 批量 reject: ${ms.toFixed(0)}ms`)
   await app.terminate().catch(() => {})
@@ -72,7 +72,7 @@ test('5000 条 pending 挂着时断连：全部一次性 reject，表清空', as
 test('terminate 时挂着的 pending 全部 reject 为 terminate', async () => {
   const { app, peer } = await bound('cli-term')
   const pendings = Array.from({ length: 500 }, () =>
-    app.nacp.request('them', { kind: 'ability', target: 't', payload: {} }).catch(e => e))
+    app.nacp.request('them', { kind: 'ability', target: 't', payload: {} }).response.catch(e => e))
   await sleep(30)
 
   app.nacp.terminate()
@@ -86,7 +86,7 @@ test('terminate 时挂着的 pending 全部 reject 为 terminate', async () => {
 test('request 到没有路由的 appId：立刻 reject not-sent，不进 pending 表', async () => {
   // REQUEST_TIMEOUT_MS = -1（业务调用不设超时），所以没有这条检查就会永远挂着。
   const app = await startBare('lonely')
-  const [err, ms] = await timed(() => app.nacp.request('压根不存在', { kind: 'ability', target: 't' }).catch(e => e))
+  const [err, ms] = await timed(() => app.nacp.request('压根不存在', { kind: 'ability', target: 't' }).response.catch(e => e))
   assert.ok(err instanceof NACPError)
   assert.equal(err.code, 'not-sent')
   assert.equal(err.phase, 'outbound')
@@ -98,7 +98,7 @@ test('request 到没有路由的 appId：立刻 reject not-sent，不进 pending
 test('1000 条 not-sent 连续失败，pending 表始终为 0', async () => {
   const app = await startBare('lonely2')
   const errs = await Promise.all(Array.from({ length: 1000 }, () =>
-    app.nacp.request('nowhere', { kind: 'ability', target: 't' }).catch(e => e.code)))
+    app.nacp.request('nowhere', { kind: 'ability', target: 't' }).response.catch(e => e.code)))
   assert.ok(errs.every(c => c === 'not-sent'))
   assert.equal(app.nacp.getPendingCount(), 0, '一条也没漏进表')
   await app.terminate().catch(() => {})
@@ -129,8 +129,8 @@ test('2000 条订阅进来：全部入表，转发监听器都在', async () => 
   await app.terminate().catch(() => {})
 })
 
-test('2000 条订阅在断连时一次性清空，bus 上不留监听器', async () => {
-  const { app, peer, sent } = await bound('sub-clean')
+test('2000 条订阅在断连宽限期后一次性清空，bus 上不留监听器', async () => {
+  const { app, peer, sent } = await bound('sub-clean', 'p1', { reconnectGraceMs: 20 })
   for (let i = 0; i < 2000; i++) {
     app.nacp.inbound(msg('subscribe', { from: 'them', to: 'sub-clean', id: `s${i}`, payload: { targetSubName: `t:${i}` } }), peer)
   }
@@ -297,7 +297,7 @@ test('50 个 App 同时注册到一个 Gateway，路由表全对', async () => {
   console.log(`    ${N} 个 App 注册到 Gateway: ${ms.toFixed(0)}ms`)
 
   // 经 Gateway 互打：peer0 → peer49
-  const [res, fwdMs] = await timed(() => clients[0].app.request('peer49', { kind: 'ability', target: 'add', payload: { a: 20, b: 22 } }))
+  const [res, fwdMs] = await timed(() => clients[0].app.request('peer49', { kind: 'ability', target: 'add', payload: { a: 20, b: 22 } }).response)
   assert.equal(res.payload, 42, '经 Gateway 转发打通')
   console.log(`    经 Gateway 的一次往返: ${fwdMs.toFixed(1)}ms`)
 
@@ -318,7 +318,7 @@ test('Gateway 转发 500 条并发，全部到位', async () => {
 
   const N = 500
   const [results, ms] = await timed(() => Promise.all(
-    Array.from({ length: N }, (_, i) => a.request('bb', { kind: 'ability', target: 'add', payload: { a: i, b: 0 } })),
+    Array.from({ length: N }, (_, i) => a.request('bb', { kind: 'ability', target: 'add', payload: { a: i, b: 0 } }).response),
   ))
   assert.deepEqual(results.map(r => r.payload), Array.from({ length: N }, (_, i) => i), '每条都是自己的回包')
   console.log(`    ${N} 条经 Gateway 转发: ${ms.toFixed(0)}ms (${(N / (ms / 1000)).toFixed(0)} req/s)`)
@@ -338,7 +338,7 @@ test('500 条并发 event request，AutoSub 表在终结后全部回收', async 
     Array.from({ length: N }, (_, i) => cli.request('srv', {
       kind: 'event', target: 'run', payload: { task: 'emit', n: 2 },
       onProcess: (c) => { chunks.set(i, (chunks.get(i) ?? 0) + 1) },
-    })),
+    }).response),
   ))
 
   assert.equal(results.length, N)
@@ -374,7 +374,7 @@ test('request 永不超时 —— REQUEST_TIMEOUT_MS = -1 是刻意的', async (
   await sleep(10)
 
   const race = await Promise.race([
-    app.nacp.request('them', { kind: 'ability', target: 't' }).catch(e => `REJECTED:${e.code}`),
+    app.nacp.request('them', { kind: 'ability', target: 't' }).response.catch(e => `REJECTED:${e.code}`),
     sleep(300).then(() => 'STILL-WAITING'),
   ])
   assert.equal(race, 'STILL-WAITING', 'request 不设超时，挂着就是挂着')

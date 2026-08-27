@@ -49,6 +49,8 @@ export function outboundEvent(msg: NACPMessage): string { return `nacp:outbound:
 export function eventProcessName(reqId: string): string { return `nacp:event:${reqId}:process` }
 /** `nacp:event:{reqId}:response` — fired when an event request reaches its terminal. */
 export function eventResponseName(reqId: string): string { return `nacp:event:${reqId}:response` }
+/** `nacp:event:{reqId}:signal` — fired when an inbound Signal targets this Event request. */
+export function eventSignalName(reqId: string): string { return `nacp:event:${reqId}:signal` }
 /** `nacp:ability:{reqId}:response` — an ability's completion. Abilities have no process stream, so this is
  *  the only name in the `nacp:ability:` family. */
 export function abilityResponseName(reqId: string): string { return `nacp:ability:${reqId}:response` }
@@ -74,10 +76,12 @@ export function callResponseName(kind: RequestKind, reqId: string): string { ret
  * `reason` is therefore always a kebab-case identifier a subscriber can compare, never a sentence.
  */
 export const NACPInternal = {
-  /** An appId↔peer binding changed inside NACP: bound after a register handshake, or dropped on unregister /
-   *  disconnect cleanup. `payload.reason` says which. This is the PROTOCOL fact — "this App is now
-   *  addressable by appId", not the App-level `napp:remote:online` / `napp:remote:offline`. */
-  nappSuccess: 'nacp:internal:napp:success',   // reason: bound | dropped
+  /** An appId↔peer binding changed inside NACP: bound after a register handshake, offline once the peer
+   *  became unreachable (physical disconnect or ack timeout — outbound backlogged, grace window running,
+   *  NOT yet cleaned up), or dropped when it is fully cleaned up (grace window expired or unregister
+   *  arrived). `payload.reason` says which. This is the PROTOCOL fact — "this App is now addressable by
+   *  appId", not the App-level `napp:remote:online` / `napp:remote:offline`. */
+  nappSuccess: 'nacp:internal:napp:success',   // reason: bound | offline | dropped
   /** Gateway flow. success = a foreign packet was forwarded on someone's behalf. error = an inbound packet
    *  was neither ours nor forwardable, so it was dropped. warning = a second peer declared Gateway and lost
    *  the first-come-first-served slot; only fires when autoMultiGatewayDowngrade is on, otherwise the
@@ -87,10 +91,25 @@ export const NACPInternal = {
   gatewayWarning: 'nacp:internal:gateway:warning',   // reason: multi-gateway-downgraded
   registerError:  'nacp:internal:register:error',    // reason: dual-gateway | version-mismatch | appId-in-use | multi-gateway | response-timeout | expect-mismatch
   requestError:   'nacp:internal:request:error',     // reason: no-processor
+  signalError:    'nacp:internal:signal:error',      // reason: no-event-processor | processor-rejected
   responseError:  'nacp:internal:response:error',    // reason: has-no-consumer
   routeError:     'nacp:internal:route:error',       // reason: no-route | send-failed | self-addressed
   notifyError:    'nacp:internal:notify:error',      // reason: has-no-consumer
   subscribeError: 'nacp:internal:subscribe:error',   // reason: unknown-subscription | bad-target-sub-name
+  /** Ack flow — the "received" confirmation every outbound message waits for. warning = 10s elapsed with
+   *  no ack (`timeout`, which marks the appId offline exactly like a physical disconnect) or a record
+   *  pushed out of the ack-pending table by a cap (`pending-overflow`); there is no retry to exhaust —
+   *  an absent ack IS the unreachability signal. error = an ack arrived naming a message this App is not
+   *  holding, which is the ack-side twin of `has-no-consumer`. */
+  ackWarning:     'nacp:internal:ack:warning',       // reason: timeout | pending-overflow
+  ackError:       'nacp:internal:ack:error',         // reason: has-no-consumer
+  /** Outbound backlog — what could not go out is held for replay on reconnect. warning = a cap forced a
+   *  loss: an incoming notify discarded at admission (`notify-dropped`, queue untouched), an older notify
+   *  evicted to make room for an incoming reliable message (`notify-evicted`), or a reliable message
+   *  evicted because no notify remained to sacrifice (`fifo-evicted`). Notify goes first — it is the one
+   *  type that expects no ack and whose loss is by design tolerable; reliable messages fall only when
+   *  there is nothing cheaper left. */
+  backlogWarning: 'nacp:internal:backlog:warning',   // reason: notify-dropped | notify-evicted | fifo-evicted
 } as const
 
 // ── payload shapes (observation only; NACP never reads these to make a decision) ──
@@ -101,8 +120,10 @@ export const NACPInternal = {
 export interface InboundPayload  { fromPeerId: NACTPeerId; msg: NACPMessage }
 export interface OutboundPayload { toPeerId: NACTPeerId | undefined; msg: NACPMessage }
 
-/** An appId↔peer binding changed. `isGateway` is meaningful on `bound` only. */
-export interface NappSuccessPayload { appId: string; reason: 'bound' | 'dropped'; isGateway?: boolean }
+/** An appId↔peer binding changed: `bound` (register handshake), `offline` (unreachable — physical disconnect
+ *  or ack timeout; outbound backlogged, grace window running, not yet cleaned up) or `dropped` (fully
+ *  cleaned up — grace window expired or unregister arrived). `isGateway` is meaningful on `bound` only. */
+export interface NappSuccessPayload { appId: string; reason: 'bound' | 'offline' | 'dropped'; isGateway?: boolean }
 /** A packet was forwarded on someone's behalf. */
 export interface GatewaySuccessPayload { toPeerId: NACTPeerId | undefined; msg: NACPMessage; reason: string }
 /** An inbound packet was neither ours nor forwardable. */
@@ -111,6 +132,6 @@ export interface GatewayErrorPayload { msg: NACPMessage; reason: string }
 export interface GatewayWarningPayload { appId: string; peerId: NACTPeerId; keptGatewayPeerId: NACTPeerId | undefined; reason: string }
 /** register failed. The appId is not bound at reject time, so the peerId is what identifies the link. */
 export interface RegisterErrorPayload { fromPeerId: NACTPeerId; from: string; reason: string }
-/** The shape shared by request / response / route / notify / subscribe errors. */
+/** The shape shared by request / response / route / notify / subscribe / ack errors — and by backlog
+ *  warnings, which need exactly the message plus the reason and so earn no shape of their own. */
 export interface ErrorMsgPayload { msg: NACPMessage; reason: string }
-

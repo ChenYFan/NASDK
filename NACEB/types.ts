@@ -12,6 +12,8 @@ import type { EventInstance } from './controller/EventFSMController.ts'
 // Runtime observation payload + level superset live at the NASDK root: NACEB and NACAB both narrate on the
 // same shape, so it is not either layer's to own.
 import type { RuntimeLevelAll, RuntimePayload, RuntimeEmitFor } from '../types.ts'
+// NACEB only invokes the schema supplied by the handler; it does not import zod at runtime.
+import type { ZodType } from 'zod'
 
 // ---- status ----
 export type EventStatus =
@@ -32,8 +34,14 @@ export type TaskStatus = 'pending' | 'running' | 'done' | 'stopped' | 'failure'
 export abstract class TaskHandler<R = unknown> {
   abstract readonly name: string
   readonly busyKeys?: string[]
+  // Pure input gate: parsed output is discarded, so execute() receives the original input unchanged.
+  readonly payloadSchema?: ZodType
   abstract execute(this: any): Promise<R>
+  onSignal?(this: any, signal: TaskSignal): void | Promise<void>
 }
+
+export interface NormalSignal { signalId: string; kind: 'normal'; payload: unknown }
+export type TaskSignal = NormalSignal | { kind: 'abort' }
 
 /** Carrier for a task's normal (done) result. Only a done task has a response. */
 export class TaskResponse {
@@ -77,6 +85,7 @@ export abstract class PipelineHandler {
   abstract readonly name: string
   readonly description?: string
   abstract next(this: any, lastResult: unknown): PipelineStep | undefined
+  onNormalSIG?(this: any, signal: NormalSignal): void | Promise<void>
 }
 
 /**
@@ -201,22 +210,23 @@ export type { RuntimePayload }
 /** Injected by NACEB at assembly: emits `naceb:runtime:{level}:{id}` on the internal EventBus. */
 export type RuntimeEmit = RuntimeEmitFor<RuntimeLevel>
 
-/** THookHandler：触发一个 T 事件 = emit T 事件（readonlyView 骑 this）+ 顺序跑该状态的 hook 列表。
- *  概念上 emit 是 hook 列表的第 0 位；实现上先 emit 后跑 hook（等价）。原 `_phase`。 */
+/** THookHandler: firing a T event = emit the T event (readonlyView over `this`) + run that state's hook list in
+ *   order. Conceptually emit is hook index 0; in code, emit runs first, then the hooks (equivalent). Formerly `_phase`. */
 export type THookHandler = (layer: string, state: string, phase: string, id: string, obj: any, hooks?: HookFn<any>[]) => Promise<void>
 
 /**
- * NACEBPrivateRef — NACEB 把自己的**私有能力**打包成一个盒子，装配时注入给三个 Controller（同一引用）。
- * Controller 只持 `.naceb`（NACEB 的 public 成员，如 taskHandlers/eventBus）+ `.ref`（本盒，私有能力）。
- * 分界无歧义:naceb 的 private 成员通过 this.naceb 访问不到，一律走 this.ref。盒内成员不带下划线。
- * 三个 controller 互引也在盒里（pipeline/event 有构造环，用 lazy getter）。
+ * NACEBPrivateRef — NACEB packs its own **private** capabilities into a box, injected to the three Controllers
+ * (the same reference). A Controller holds only `.naceb` (NACEB's public members, e.g. taskHandlers/eventBus) +
+ * `.ref` (this box, private capabilities). The cut is unambiguous: NACEB's private members are unreachable via
+ * this.naceb, so they always go through this.ref. Members in the box carry no underscore. The controllers'
+ * mutual cross-references also live here (pipeline/event have a construction cycle, resolved with lazy getters).
  */
 export interface NACEBPrivateRef {
   THookHandler: THookHandler
   emit: RuntimeEmit
   emitMessage: (t: any, chunk: unknown) => void
   alertTick: (from: string) => void
-  /** 拉起 20Hz 基础时钟（幂等）。idle/paused 不撑时钟，故 start()/resume() 离开豁免态时必须调它重启。 */
+  /** Bring the 20Hz base clock up (idempotent). idle/paused don't hold the clock, so start()/resume() must call it when leaving an exempt state. */
   ensureClock: () => void
   forceCleanEventUnderLayer: (eventId: string) => Promise<void>
   taskController: import('./controller/TaskFSMController.ts').TaskFSMController

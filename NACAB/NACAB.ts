@@ -110,7 +110,7 @@ export class NACAB {
     t._bus = this.eventBus
     this._emit('log', t.id, { layer: LAYER, id: t.id, msg: `invoke '${name}'`, opt: { name } })
 
-    // pending → running（before + after 忠实上报）
+    // pending → running (report before + after faithfully)
     this.transition(t, 'running')
 
     try {

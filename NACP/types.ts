@@ -1,5 +1,5 @@
 /**
- * NACP types — the message envelope (NACPBaseMessage → 7 full-name subclasses, discriminated on `type`),
+ * NACP types — the message envelope (NACPBaseMessage → 9 message types, discriminated on `type`),
  * the meta inheritance tree, the ability Declaration, and buildMessage (the single source of truth for
  * constructing a NACPMessage).
  *
@@ -26,7 +26,7 @@ import type { Declaration } from '../types.ts'
 
 export type NACPType =
   | 'register' | 'unregister' | 'subscribe' | 'unsubscribe'
-  | 'notify' | 'request' | 'response'
+  | 'notify' | 'request' | 'response' | 'signal' | 'ack'
 
 /** Protocol version. Same `major` = compatible; cross-`major` = incompatible. `minor` is in-major
  *  evolution room. Checked ONCE at register (cross-major → reject); other messages carry it without
@@ -42,7 +42,9 @@ export interface NACPBaseMessage {
   from: string       // sender App (end-to-end, never rewritten hop-by-hop)
   to: string         // recipient App (on register: the expected peer appId)
   t: number          // epoch ms, stamped by buildMessage
-  payload: BasePayload  // each subclass narrows this to its own named payload type
+  payload?: any         // the base does NOT take a position on payload; every concrete message declares its own
+                        // (normal signal and 7 others carry one; control signal and ack omit it). `any` here so no layer has to invent a
+                        // widened view of the envelope just to hand it to an encoder
   meta: BaseMeta        // protocol metadata base; each subclass narrows to a concrete XxxMeta
 }
 
@@ -105,6 +107,10 @@ export interface BaseMeta {
  *  ordinary ability the App registers into its own processor (target 'NApp.introduce'), so the ordinary request
  *  path covers it. */
 export type RequestKind = 'event' | 'ability'
+export type SignalKind = 'normal' | 'pause' | 'resume' | 'abort'
+export type SignalOpt =
+  | { parentId: string; kind: 'normal'; payload?: unknown }
+  | { parentId: string; kind: 'pause' | 'resume' | 'abort' }
 
 /** Deliberately empty — register is internal traffic, so everything it says lives in RegisterPayload. */
 export interface RegisterMeta extends BaseMeta {}
@@ -193,6 +199,26 @@ export interface SubscribeResponsePayload extends ResponsePayload { targetSubId:
 /** The payload of the response to an unsubscribe — nothing beyond isOk. */
 export interface UnsubscribeResponsePayload extends ResponsePayload {}
 
+/**
+ * ack = "the response with this id reached me". Sent by a response's RECEIVER, and only for a response that
+ * answers a `request` — the four internal families are protocol traffic whose sender tears its route down
+ * immediately, so there is nothing left to confirm to.
+ *
+ * It confirms ARRIVAL, not business success: a response's own isOk/payload are untouched by it. The response
+ * remains the terminal of the original operation; an ack only lets the response's SENDER stop retransmitting.
+ *
+ * `parentId` (not a `target*` name) because ack is a back-pointing type, which is exactly what BaseMeta's
+ * pairing anchor is for. The `target*` names belong to payload fields naming an operand.
+ */
+export interface AckMeta extends BaseMeta {
+  parentId: string   // = the acknowledged Response.id (narrowed to required)
+}
+
+export interface SignalMeta extends BaseMeta {
+  parentId: string
+  kind: SignalKind
+}
+
 /** notify = the forwarding of one emit on the subscribed side. Push, never answered, 0..N of them.
  *  It is NOT the terminal signal — the terminal is always that one unique response. */
 export interface NotifyMeta extends BaseMeta {
@@ -215,11 +241,12 @@ export interface UnsubscribeMeta extends BaseMeta {}
  *  7 types line up as `XxxMessage.meta: XxxMeta` — and so a future unregister-only field has an obvious home. */
 export interface UnregisterMeta extends BaseMeta {}
 
-// ── 7 full-name subclasses: narrow the `type` literal + BOTH meta and payload ──
+// ── 9 message types: narrow the `type` literal + BOTH meta and payload ──
 //
 // Every one names its own meta AND its own payload — no subclass falls back on a Base. A `response` is the one
 // type whose payload depends on what it answers, so it takes the union of the four readable shapes plus
-// UnknownPayload (when it answers a request). The caller narrows by looking at what it sent.
+// UnknownPayload (when it answers a request). The caller narrows by looking at what it sent. `ack` is the one
+// type with NO payload at all: it says nothing except "that response id arrived".
 
 export interface RegisterMessage    extends NACPBaseMessage { type: 'register';    meta: RegisterMeta;    payload: RegisterPayload }
 export interface UnregisterMessage  extends NACPBaseMessage { type: 'unregister';  meta: UnregisterMeta;  payload: UnregisterPayload }
@@ -228,6 +255,16 @@ export interface UnsubscribeMessage extends NACPBaseMessage { type: 'unsubscribe
 export interface NotifyMessage      extends NACPBaseMessage { type: 'notify';      meta: NotifyMeta;      payload: UnknownPayload }
 export interface RequestMessage     extends NACPBaseMessage { type: 'request';     meta: RequestMeta;     payload: UnknownPayload }
 export interface ResponseMessage    extends NACPBaseMessage { type: 'response';    meta: ResponseMeta;    payload: ResponsePayloadUnion }
+export interface NormalSignalMessage extends NACPBaseMessage {
+  type: 'signal'; meta: SignalMeta & { kind: 'normal' }; payload: UnknownPayload
+}
+export interface ControlSignalMessage extends NACPBaseMessage {
+  type: 'signal'; meta: SignalMeta & { kind: 'pause' | 'resume' | 'abort' }; payload?: undefined
+}
+export type SignalMessage = NormalSignalMessage | ControlSignalMessage
+// The ONE type with no payload at all: `payload?: undefined` says it may only ever be absent, and
+// buildMessage omits the key entirely so nothing rides the wire either.
+export interface AckMessage         extends NACPBaseMessage { type: 'ack';         meta: AckMeta;         payload?: undefined }
 
 /** What a `response` can carry: the four readable shapes, or business data when it answers a request. */
 export type ResponsePayloadUnion =
@@ -238,7 +275,7 @@ export type ResponsePayloadUnion =
 /** The outward union — `switch(msg.type)` narrows `msg.meta` to the right XxxMeta with no hand-written casts. */
 export type NACPMessage =
   | RegisterMessage | UnregisterMessage | SubscribeMessage | UnsubscribeMessage
-  | NotifyMessage | RequestMessage | ResponseMessage
+  | NotifyMessage | RequestMessage | ResponseMessage | SignalMessage | AckMessage
 
 // ============================================================
 // Ability declaration — RE-EXPORTED from the NASDK root, not defined here.
@@ -259,15 +296,16 @@ export type { Event, Ability, EventList, AbilitiesList, Declaration } from '../t
 //   (NACT constructs no NACP messages).
 // ============================================================
 
-export const PROTOCOL_V: ProtocolVersion = { major: 1, minor: 0 }
+export const PROTOCOL_V: ProtocolVersion = { major: 2, minor: 1 }
 
 /** Fields that vary by message type — buildMessage switches on `type` to pick the ones it needs. */
 export type BuildOpt = {
   kind?: RequestKind; target?: string                                           // request
-  parentId?: string; isOk?: boolean; whyNotOk?: string                          // response
+  parentId?: string; isOk?: boolean; whyNotOk?: string                          // response (parentId also: notify / ack)
   targetSubName?: string; hitSubName?: string                                   // subscribe + notify
   targetSubId?: string                                                          // unsubscribe
   isGateway?: boolean; decl?: Declaration; record?: boolean                      // register
+  signalKind?: SignalKind                                                        // signal
   payload?: unknown          // ONLY for request / response-to-request / notify. The four internal types build
                              // their payload from the named options above; passing one here is ignored.
 }
@@ -300,6 +338,17 @@ export function buildMessage(self: string, type: NACPType, to: string, opt: Buil
     case 'notify':
       return { ...base, payload: given,
         meta: { parentId: opt.parentId!, targetSubName: opt.targetSubName!, hitSubName: opt.hitSubName! } } as NotifyMessage
+    case 'signal':
+      if (opt.signalKind === 'normal') {
+        return { ...base, payload: given,
+          meta: { parentId: opt.parentId!, kind: 'normal' } satisfies SignalMeta } as NormalSignalMessage
+      }
+      return { ...base,
+        meta: { parentId: opt.parentId!, kind: opt.signalKind! } satisfies SignalMeta } as ControlSignalMessage
+    // ack: the one type built WITHOUT a payload key. Not `payload: undefined` — CBOR encodes an explicit
+    // undefined as a real field, and an ack carrying a payload slot at all would contradict what it is.
+    case 'ack':
+      return { ...base, meta: { parentId: opt.parentId! } satisfies AckMeta } as AckMessage
     // The four internal types: meta is empty, everything they say goes in the typed payload. The caller never
     // supplies one for these — we build it from the named options.
     case 'register':

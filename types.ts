@@ -92,6 +92,10 @@ export interface ProcessorHooks {
   onProcess: (chunk: any) => void
 }
 
+export type ProcessorSignalSpec =
+  | { signalId: string; reqId: string; kind: 'normal'; payload: unknown }
+  | { signalId: string; reqId: string; kind: 'pause' | 'resume' | 'abort' }
+
 /**
  * The contract NACP's binding layer depends on, in its minimal form: a Processor can be READ (list) and
  * PUSHED (push). Nothing else is universal across kinds.
@@ -113,7 +117,9 @@ export interface Processor {
  * There is deliberately no `register` on this side: an event's implementation is not a single callable (NACEB
  * resolves an event name to a pipeline of tasks), so a generic `register(item)` would have nothing to mean.
  */
-export interface EventProcessor extends Processor {}
+export interface EventProcessor extends Processor {
+  signal(spec: ProcessorSignalSpec): Promise<void>
+}
 
 /**
  * The ability side additionally accepts REGISTRATION from outside: `register` is an ordinary capability port,
@@ -146,7 +152,7 @@ export interface AbilityProcessor extends Processor {
 // ============================================================
 
 /** Every level any Processor may narrate at. A layer narrows this to what it can emit. */
-export type RuntimeLevelAll = 'error' | 'warning' | 'log' | 'message'
+export type RuntimeLevelAll = 'error' | 'warning' | 'log' | 'message' | 'signal'
 
 /** Payload of a `*:runtime:{level}:{id}` event. `layer`/`id`/`msg` are the stable fields; anything
  *  level-specific (a transition's from/to, an error's phase/state, a message's chunk) rides in `opt`, so an
@@ -160,4 +166,3 @@ export interface RuntimePayload {
 
 /** A layer's own runtime emitter, parameterised by the level subset that layer supports. */
 export type RuntimeEmitFor<L extends RuntimeLevelAll> = (level: L, id: string, payload: RuntimePayload) => void
-

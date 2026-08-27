@@ -12,6 +12,7 @@ import {
   TERMINAL, FIRE4SUBEVENT, WAIT4SUBEVENT, BUILTIN_NAMES,
 } from '../types.ts'
 import type { TaskStatus, PipelineStep, SubEventSpec, NACEBRef, HookFn, NACEBPrivateRef } from '../types.ts'
+import { nacebInternal } from '../errors.ts'
 import type { NACEB } from '../NACEB.ts'
 import { TaskInstance } from '../instance/TaskInstance.ts'
 export { TaskInstance } from '../instance/TaskInstance.ts'
@@ -20,9 +21,10 @@ import type { PipelineInstance } from '../instance/PipelineInstance.ts'
 // ============================================================
 // builtin privileged handlers
 // ============================================================
-// 三个内建 handler 的 execute 与用户 handler 同构：`this` = TaskInstance，唯一入参 = 上游 PipelineInstance。
-// naceb 能力（pushEvent/getEvent/consumeEvent）靠**闭包**捕获 ref 取得——不能挂在 handler 实例上
-// （因为 this 已经绑到 TaskInstance，读不到 handler 自己的字段）。这层特权只有内建 handler 有。
+// The three builtin handlers' execute is shaped like a user handler (`this` = TaskInstance, sole param = the
+// upstream PipelineInstance). NACEB capability (pushEvent/getEvent/consumeEvent) is captured via a **closure**
+// over ref — it can't live on the handler instance (this is bound to the TaskInstance, so the handler can't read
+// its own fields). This privilege belongs only to builtins.
 
 function makeTerminalHandler(): TaskHandler {
   return new class extends TaskHandler<unknown> {
@@ -80,12 +82,12 @@ export class TaskFSMController {
     this.naceb = naceb; this.ref = ref
   }
 
-  /** 查 handler：先内部 builtins（$ task），再走 naceb 的 public taskHandlers 注册表。 */
+  /** Look up a handler: internal builtins ($ task) first, then NACEB's public taskHandlers registry. */
   _getHandler(name: string): TaskHandler | undefined {
     return this.builtins.get(name) ?? this.naceb.taskHandlers.get(name)
   }
 
-  /** 查询该 event 的所有 task（运行时通常 0-1 个，因 pipeline 单 currentTask）。forceCleanEventUnderLayer 用它列出待清理的 task。 */
+  /** All tasks of this event (at runtime usually 0-1, as a pipeline has a single current task). forceCleanEventUnderLayer uses it to list tasks to clean. */
   findTaskByEventId(eventId: string): TaskInstance[] {
     return [...this.byId.values()].filter(t => t.eventId === eventId)
   }
@@ -95,6 +97,11 @@ export class TaskFSMController {
 
   dispatch(pipeline: PipelineInstance, step: PipelineStep): TaskInstance {
     const h = this._getHandler(step.task); if (!h) throw new Error(`unknown task '${step.task}'`)
+    // Validate before constructing the task. PipelineInstance turns this throw into pipeline/event failure.
+    if (h.payloadSchema) {
+      const r = h.payloadSchema.safeParse(step.input)
+      if (!r.success) throw nacebInternal('bad-task-input', `task '${step.task}' input rejected: ${r.error.message}`)
+    }
     const t = new TaskInstance(this, pipeline, step, h)
     this.byId.set(t.id, t)
     if (t.isBlocked()) for (const k of t.busyKeys) { if (!this.blockedQueue.has(k)) this.blockedQueue.set(k, []); this.blockedQueue.get(k)!.push(t) }
@@ -110,9 +117,10 @@ export class TaskFSMController {
   }
   private isLaneFree(k: string) { return !(this.blockedQueue.get(k) || []).some(t => t.status === 'running') }
 
-  /** ignite：把 pending task 转 running 后 _run。错误处理已全内建进 TaskInstance._transition（beforeTRunning
-   *  是 task 唯一可 veto 点：veto → 留 pending、返回 false；hook bug → 内部落本层 failure、返回 false）。这里只读
-   *  bool：转成 running（true）才 _run；否则不 _run（veto 留 pending 下拍重试 / bug 已 failure）。都算这拍有动作。 */
+  /** ignite: promote a pending task to running, then _run. Error handling is built into TaskInstance._transition
+   *  (beforeTRunning is the task's only veto point: veto → stay pending, return false; hook bug → layer failure,
+   *  return false). Here we only read the bool: go running (true) → _run; otherwise don't (veto stays pending to
+   *  retry next beat / bug already failure). Either counts as an action this beat. */
   private async _ignite(t: TaskInstance): Promise<boolean> {
     if (await t._transition('running')) t._run()
     return true

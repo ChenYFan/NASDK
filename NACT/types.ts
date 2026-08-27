@@ -20,7 +20,7 @@ export type { NACPMessage }   // re-exported so NACT-internal modules import mes
 export type Transport = 'ws' | 'tcp' | 'unix'
 
 /** CBOR encoding mode, not a separate compression layer. MVP is fixed 'none' (standard CBOR); the field
- *  is a reserved negotiation slot (see the NACT doc「线格式：CBOR」) that NACT does not read yet. */
+ *  is a reserved negotiation slot (see the NACT doc, "wire format: CBOR") that NACT does not read yet. */
 export type CompressionKind = 'none' | 'cbor-records'
 
 /** Heartbeat interval in ms — ONE number, no separate timeout. `-1` disables it.
@@ -59,26 +59,6 @@ export type TransportSpec =
  *  sends without touching the socket. The appId↔peerId mapping lives in NACP, never here. */
 export type NACTPeerId = string
 
-/** The **wire view** of a NACP message: identical envelope, `payload` widened to `any`.
- *
- *  Why it exists: a NACP payload is either a shape NACP reads (the four handshake types) or UnknownPayload,
- *  which forbids reading arbitrary fields. But the CBOR encoder has to physically WALK whatever is there
- *  (descend into it, turn Buffers into bytes), and neither form permits that. So the widening happens here,
- *  at the one layer that legitimately traverses payloads, and nowhere else.
- *
- *  `payload` stays REQUIRED: every NACP message carries one, and encoding is precisely the act of walking it.
- *  Making it optional here would let a payload-less object masquerade as a NACPMessage on the way back in.
- *
- *  ⚠️ `WidenPayload` is a **distributive** conditional type, and that is load-bearing: a bare
- *  `Omit<NACPMessage, 'payload'>` would flatten the 7-member union into ONE object whose `type` is the full
- *  literal union — destroying the discriminant, so it no longer narrows back to RegisterMessage/etc. and no
- *  longer assigns to NACPMessage. Distributing over a naked type parameter keeps 7 separate members, each
- *  with its own narrow `type`.
- *
- *  Widened ≠ interpreted: NACT walks the payload without knowing what any field MEANS. */
-type WidenPayload<M> = M extends any ? Omit<M, 'payload'> & { payload: any } : never
-export type NACPWireMessage = WidenPayload<NACPMessage>
-
 /** A physical connection, carrier-abstracted. Sends/receives OBJECTS — the codec is internal, applied at
  *  the wire edge, so every layer above NACT only ever handles messages, never bytes.
  *  `appId` is deliberately absent: identity is NACP's business (its appId↔peerId table).
@@ -95,10 +75,11 @@ export interface Peer {
 
 /** Codec at the wire edge — CBOR (cbor-x). encode → binary bytes (Buffers ride as bytes, no base64).
  *  NACT-internal only: it is the single place in the stack where objects become bytes.
- *  Takes/returns NACPWireMessage: encoding is precisely the act of traversing the payload. */
+ *  Takes/returns NACPMessage: the encoder walks the payload without knowing what any field MEANS, which is
+ *  the precise sense in which a payload is semantically opaque yet physically traversable. */
 export interface Codec {
-  encode(msg: NACPWireMessage): Uint8Array
-  decode(data: Uint8Array): NACPWireMessage
+  encode(msg: NACPMessage): Uint8Array
+  decode(data: Uint8Array): NACPMessage
 }
 
 /** Handle returned by listen() — closes that one server entry. */

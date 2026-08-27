@@ -49,8 +49,8 @@ async function spawnPeer(cfg) {
 }
 
 /** 起一个本地 App，绑好默认 Processor，连到对端。 */
-async function localApp(id, expect, spec) {
-  const app = new NApp({ id })
+async function localApp(id, expect, spec, opt) {
+  const app = new NApp({ id, opt })
   app.bindProcessor('event', makeNaceb().nacpAdaptor)
   app.bindProcessor('ability', makeNacab().nacpAdaptor)
   await app.start()
@@ -228,28 +228,28 @@ test('terminate 后所有出站方法立刻失败，不是超时', async () => {
 
   // stopping 闩一旦落下就不可逆，出站方法应当同步抛/立刻 reject
   const [, ms] = await timed(async () => {
-    await assert.rejects(() => app.request('srv', { kind: 'ability', target: 'add', payload: {} }))
+    await assert.rejects(() => app.request('srv', { kind: 'ability', target: 'add', payload: {} }).response)
   })
   assert.ok(ms < 500, `stopping 后立刻失败而不是等超时，实测 ${ms.toFixed(1)}ms`)
 
   await peer.stop()
 })
 
-test('对端进程猝死：本地 pending 立刻 reject，不等超时', async () => {
+test('对端进程猝死：本地 pending 在重连宽限到期后 reject', async () => {
   const spec = tcp(PORT.edgeDead + 3)
   const peer = await spawnPeer({ id: 'srv', server: [spec] })
-  const app = await localApp('cli', 'srv', spec)
+  const app = await localApp('cli', 'srv', spec, { reconnectGraceMs: 50 })
 
   // 挂一个对端不会答的 request（对端没有 'never' 这个 ability，但我们不 await 结果，只看断线时的反应）
-  const pending = app.request('srv', { kind: 'ability', target: 'slow', payload: { ms: 60000 } }).catch(e => e)
+  const pending = app.request('srv', { kind: 'ability', target: 'slow', payload: { ms: 60000 } }).response.catch(e => e)
   await sleep(50)
 
   // 直接杀对端进程（不是优雅 bye）
   peer.child.kill('SIGKILL')
   const [err, ms] = await timed(() => pending)
   assert.ok(err instanceof Error, '对端猝死后 pending 被 reject')
-  assert.ok(ms < 3000, `断线立刻 reject 而不是干等，实测 ${ms.toFixed(0)}ms`)
-  console.log(`    对端 SIGKILL 后 pending reject: ${ms.toFixed(0)}ms`)
+  assert.ok(ms >= 40 && ms < 3000, `应在 50ms 宽限到期后 reject，实测 ${ms.toFixed(0)}ms`)
+  console.log(`    对端 SIGKILL 后宽限到期 reject: ${ms.toFixed(0)}ms`)
 
   await app.terminate().catch(() => {})
 })

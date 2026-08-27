@@ -56,9 +56,13 @@
     "test:full": "node --experimental-strip-types --test \"test/full/*.test.mjs\"",
     "test:edge": "node --experimental-strip-types --test \"test/edge/*.test.mjs\""
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "cbor-x": "^1.6.4",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

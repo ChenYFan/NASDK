@@ -96,7 +96,7 @@ test('绑一个自制 Processor 也行 —— NACP 只认契约', async () => {
 
   const cli = await startApp('cli-c')
   await cli.app.connect('c', tcp(PORT.nappC))
-  const res = await cli.app.request('c', { kind: 'ability', target: 'custom.thing', payload: {} })
+  const res = await cli.app.request('c', { kind: 'ability', target: 'custom.thing', payload: {} }).response
   assert.deepEqual(res.payload, { from: 'custom' })
 
   await cli.stop()
@@ -162,7 +162,7 @@ test('terminate 之后所有出站 API 都拒绝', async () => {
   const app = await startApp('stopping')
   await app.app.terminate()
 
-  await assert.rejects(app.app.request('x', { kind: 'ability', target: 't' }), (e) => e.code === 'stopping')
+  await assert.rejects(app.app.request('x', { kind: 'ability', target: 't' }).response, (e) => e.code === 'stopping')
   await assert.rejects(app.app.unsubscribe('x', 's'), (e) => e.code === 'stopping')
   await assert.rejects(app.app.connect('x', tcp(PORT.napp)), (e) => e.code === 'stopping')
   await assert.rejects(app.app.disconnect('x'), (e) => e.code === 'stopping')
@@ -209,7 +209,7 @@ test('disconnect 只断一个，其他链路不受影响，还能连回来', asy
   assert.deepEqual((await b.ask('peers')).peers, ['me'], 'B 那边还在')
 
   // B 仍然能用
-  const res = await me.app.request('B', { kind: 'ability', target: 'add', payload: { a: 1, b: 1 } })
+  const res = await me.app.request('B', { kind: 'ability', target: 'add', payload: { a: 1, b: 1 } }).response
   assert.equal(res.payload, 2)
 
   // A 能重连
@@ -238,18 +238,18 @@ test('对端进程死掉 → 本地自动清理', async () => {
   await app.stop()
 })
 
-test('对端死掉时在途请求会失败，不会永远挂着', async () => {
+test('对端死掉时在途请求在重连宽限到期后失败', async () => {
   const peer = await spawnPeer({ id: 'dying2', server: [tcp(PORT.nappC)] })
-  const app = await startApp('waiter')
+  const app = await startApp('waiter', { opt: { reconnectGraceMs: 50 } })
   await app.app.connect('dying2', tcp(PORT.nappC))
 
   // hang 事件永不返回；杀掉对端应该让它 reject
-  const pending = app.app.request('dying2', { kind: 'event', target: 'run', payload: { task: 'hang' } })
+  const pending = app.app.request('dying2', { kind: 'event', target: 'run', payload: { task: 'hang' } }).response
   await sleep(80)
   peer.child.kill('SIGKILL')
 
   await assert.rejects(pending, (e) => {
-    assert.ok(/disconnect/i.test(e.message), `失败原因应提到断连：${e.message}`)
+    assert.ok(/gone/i.test(e.message), `宽限到期后应报告 peer gone：${e.message}`)
     return true
   })
   await app.stop()
@@ -262,14 +262,14 @@ test('ability 与 event 端到端，含过程流', async () => {
   const app = await startApp('cli')
   await app.app.connect('srv', tcp(PORT.napp))
 
-  const ab = await app.app.request('srv', { kind: 'ability', target: 'add', payload: { a: 20, b: 22 } })
+  const ab = await app.app.request('srv', { kind: 'ability', target: 'add', payload: { a: 20, b: 22 } }).response
   assert.equal(ab.payload, 42)
 
   const chunks = []
   const ev = await app.app.request('srv', {
     kind: 'event', target: 'run', payload: { task: 'emit', n: 4 },
     onProcess: (c) => chunks.push(c.i),
-  })
+  }).response
   assert.deepEqual(chunks, [0, 1, 2, 3], '过程流按序到齐')
   assert.deepEqual(ev.payload, { emitted: 4 })
 
@@ -282,7 +282,7 @@ test('并发请求各自对上自己的响应', async () => {
   await app.app.connect('srv', tcp(PORT.napp))
 
   const results = await Promise.all(
-    Array.from({ length: 20 }, (_, i) => app.app.request('srv', { kind: 'ability', target: 'add', payload: { a: i, b: 100 } })),
+    Array.from({ length: 20 }, (_, i) => app.app.request('srv', { kind: 'ability', target: 'add', payload: { a: i, b: 100 } }).response),
   )
   assert.deepEqual(results.map(r => r.payload), Array.from({ length: 20 }, (_, i) => i + 100))
 
@@ -298,7 +298,7 @@ test('多个 event 的过程流不会串台', async () => {
   await Promise.all(boxes.map((box, i) => app.app.request('srv', {
     kind: 'event', target: 'run', payload: { task: 'emit', n: i + 2 },
     onProcess: (c) => box.push(c.i),
-  })))
+  }).response))
 
   assert.deepEqual(boxes[0], [0, 1])
   assert.deepEqual(boxes[1], [0, 1, 2])
@@ -311,11 +311,11 @@ test('未知 target / 失败的 handler 都 reject', async () => {
   const app = await startApp('cli')
   await app.app.connect('srv', tcp(PORT.napp))
 
-  await assert.rejects(app.app.request('srv', { kind: 'ability', target: '没这个', payload: {} }),
+  await assert.rejects(app.app.request('srv', { kind: 'ability', target: '没这个', payload: {} }).response,
     (e) => e.code === 'response-not-ok')
-  await assert.rejects(app.app.request('srv', { kind: 'ability', target: 'fail', payload: {} }),
+  await assert.rejects(app.app.request('srv', { kind: 'ability', target: 'fail', payload: {} }).response,
     (e) => e.code === 'response-not-ok')
-  await assert.rejects(app.app.request('srv', { kind: 'event', target: '没这个事件', payload: {} }),
+  await assert.rejects(app.app.request('srv', { kind: 'event', target: '没这个事件', payload: {} }).response,
     (e) => e.code === 'response-not-ok')
 
   await app.stop(); await peer.stop()
@@ -323,7 +323,7 @@ test('未知 target / 失败的 handler 都 reject', async () => {
 
 test('发给没连过的 appId 会 reject', async () => {
   const app = await startApp('lonely')
-  await assert.rejects(app.app.request('陌生人', { kind: 'ability', target: 't', payload: {} }))
+  await assert.rejects(app.app.request('陌生人', { kind: 'ability', target: 't', payload: {} }).response)
   await app.stop()
 })
 
@@ -332,7 +332,7 @@ test('NApp.introduce：拿对端的完整声明', async () => {
   const app = await startApp('cli')
   await app.app.connect('srv', tcp(PORT.napp))
 
-  const res = await app.app.request('srv', { kind: 'ability', target: 'NApp.introduce', payload: {} })
+  const res = await app.app.request('srv', { kind: 'ability', target: 'NApp.introduce', payload: {} }).response
   assert.ok(res.payload.events.some(e => e.name === 'run'))
   assert.ok(res.payload.abilities.some(a => a.name === 'add'))
   assert.deepEqual(res.payload, (await peer.ask('decl')).decl, '和对端自己算的一致')
@@ -346,7 +346,7 @@ test('大 payload 双向穿透', async () => {
   await app.app.connect('srv', tcp(PORT.napp))
 
   const big = 'B'.repeat(300 * 1024)
-  const res = await app.app.request('srv', { kind: 'ability', target: 'echo', payload: { big } })
+  const res = await app.app.request('srv', { kind: 'ability', target: 'echo', payload: { big } }).response
   assert.equal(res.payload.big, big)
 
   await app.stop(); await peer.stop()
@@ -359,7 +359,7 @@ test('二进制 payload 原样往返（CBOR 字节串，不转 base64）', async
 
   const bin = new Uint8Array(1024)
   for (let i = 0; i < bin.length; i++) bin[i] = i % 256
-  const res = await app.app.request('srv', { kind: 'ability', target: 'echo', payload: { bin } })
+  const res = await app.app.request('srv', { kind: 'ability', target: 'echo', payload: { bin } }).response
   assert.deepEqual([...res.payload.bin], [...bin])
 
   await app.stop(); await peer.stop()
@@ -465,9 +465,9 @@ test('通配符订阅：hitSubName 区分具体事件', async () => {
   await app.stop(); await peer.stop()
 })
 
-test('对端断开时流结束，for await 自然退出', async () => {
+test('对端断开并超过重连宽限后，流结束且 for await 自然退出', async () => {
   const peer = await spawnPeer({ id: 'srv', server: [tcp(PORT.napp)] })
-  const app = await startApp('cli')
+  const app = await startApp('cli', { opt: { reconnectGraceMs: 50 } })
   await app.app.connect('srv', tcp(PORT.napp))
 
   const [sub, stream] = app.app.subscribe('srv', 'dead:*')
@@ -493,7 +493,7 @@ test('一个 App 同开三种入口，三种都能连', async () => {
   for (const spec of specs) {
     const cli = await startApp(`cli-${spec.type}`)
     await cli.app.connect('multi', spec)
-    const res = await cli.app.request('multi', { kind: 'ability', target: 'add', payload: { a: 1, b: 2 } })
+    const res = await cli.app.request('multi', { kind: 'ability', target: 'add', payload: { a: 1, b: 2 } }).response
     assert.equal(res.payload, 3, spec.type)
     await cli.stop()
   }
@@ -509,8 +509,8 @@ test('一个 App 连多个对端，互不干扰', async () => {
   await me.app.connect('B', ws(PORT.nappB))
 
   const [ra, rb] = await Promise.all([
-    me.app.request('A', { kind: 'ability', target: 'echo', payload: { who: 'A' } }),
-    me.app.request('B', { kind: 'ability', target: 'echo', payload: { who: 'B' } }),
+    me.app.request('A', { kind: 'ability', target: 'echo', payload: { who: 'A' } }).response,
+    me.app.request('B', { kind: 'ability', target: 'echo', payload: { who: 'B' } }).response,
   ])
   assert.deepEqual(ra.payload, { who: 'A' })
   assert.deepEqual(rb.payload, { who: 'B' })
@@ -530,7 +530,7 @@ test('Gateway 转发：A 经 Gateway 打到 B', async () => {
   await a.app.connect('gw', tcp(PORT.nappGw))
 
   // A 只连了 gw，没连 B —— 出站找不到 B 的路由就兜到 Gateway
-  const res = await a.app.request('B', { kind: 'ability', target: 'add', payload: { a: 3, b: 4 } })
+  const res = await a.app.request('B', { kind: 'ability', target: 'add', payload: { a: 3, b: 4 } }).response
   assert.equal(res.payload, 7, '经 Gateway 转发到了 B')
 
   await a.stop(); await b.stop(); await gw.stop()
@@ -558,7 +558,7 @@ test('nacp / nact 事件都汇到同一个 app.bus', async () => {
   const nactEv = collect(app.app.bus, 'nact:*:*')
 
   await app.app.connect('srv', tcp(PORT.napp))
-  await app.app.request('srv', { kind: 'ability', target: 'add', payload: { a: 1, b: 1 } })
+  await app.app.request('srv', { kind: 'ability', target: 'add', payload: { a: 1, b: 1 } }).response
 
   nacpEv.stop(); nactEv.stop()
   assert.ok(nacpEv.events.length > 0, 'nacp:* 有事件')

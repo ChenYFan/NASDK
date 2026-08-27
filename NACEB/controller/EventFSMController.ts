@@ -46,10 +46,10 @@ export class EventFSMController {
   }
 
   /** Clock liveness: keep running while any event still needs attention —
-   *  idle / paused 是 **tick 豁免态**（分别等外部 start() 和 resume()，nextTick 一律绕过），故它们**不撑时钟**：
-   *  只有 idle/paused 的队列会直接停表，由 start()/resume() 里的 ensureClock 重新拉起。
-   *  其余：非终局 = live；终局但 !bypassConsume 也 live（等外部 consume）。
-   *  终局 + bypassConsume 不 live（discard-on-terminal；perTick 会自动消费掉它）。 */
+   *  idle / paused are tick-exempt (waiting for external start() / resume(); nextTick always skips them), so they
+   *  do NOT hold the clock: a queue of only idle/paused stops it, and start()/resume() re-arm it via ensureClock.
+   *  Non-terminal = live; terminal but !bypassConsume is also live (waiting for external consume).
+   *  Terminal + bypassConsume is not live (discard-on-terminal; perTick auto-consumes). */
   hasLive(): boolean {
     return this.queue.some(e => {
       if (e.status === 'idle' || e.status === 'paused') return false
@@ -59,14 +59,15 @@ export class EventFSMController {
   }
 
   /** nextTick — only the event controller returns after a single action. Order 1→4, ignoring idle/paused.
-   *  错误处理全内建进 EventInstance._transition（veto→留原态、bug→forceCleanEventUnderLayer+落 failure），
-   *  故这里调用点干净：`await e._transition(...)` 后直接 return true（这拍有动作，走 self 补拍/下拍重试）。
-   *  **idle / paused 是 tick 豁免态**：idle 等外部 start()，paused 等外部 resume()，perTick 一律不碰。
-   *  pause/resume 链是全有或全无的（下层失败则上层回滚），所以不存在「event paused 但 pipeline 已终局」的
-   *  错位需要 tick 兜底。done/failure 只在第 4 步做 bypassConsume 回收。 */
+   *  Error handling is entirely inside EventInstance._transition (veto→stay, bug→forceCleanEventUnderLayer +
+   *  failure), so the call sites are clean: `await e._transition(...)` then return true (this beat had an action;
+   *  self re-fire / next-beat retry). Nothing here needs a fallback: pause/resume are all-or-nothing (roll back on
+   *  lower-layer failure), so "event paused but pipeline terminal" never exists for the tick to repair. done/failure
+   *  are reclaimed only in step 4 (bypassConsume). */
   async nextTick(): Promise<boolean> {
     const P = this.ref.pipelineController()
-    // 1 processing/pending/activating: 同步 pipeline 状态到 event（终局→收终局；无 task→不动；否则按 task 类型对齐）。
+    // 1 processing/pending/activating: sync pipeline state to the event (terminal → take terminal; no task → skip;
+    //   else align to the task kind).
     for (const e of this.queue) {
       if (e.status !== 'processing' && e.status !== 'pending' && e.status !== 'activating') continue
       const ps = P.getStatus(e.id)
@@ -75,8 +76,9 @@ export class EventFSMController {
       const want: EventStatus | null = kind === 'blocked' ? 'processing' : kind === 'async' ? 'pending' : null
       if (want && want !== e.status) { await e._transition(want); return true }
     }
-    // 2 queue: same-scope unoccupied → transition to activating; pipeline 在 transition 的 func 里建（beforeTActivating
-    //   veto → 什么都没建、event 留 queue；hook bug → _transition 内崩溃链落 failure）。都算这拍有动作 → return true。
+    // 2 queue: same-scope unoccupied → activating; the pipeline is built inside the transition func (beforeTActivating
+    //   veto → nothing built, event stays queue; hook bug → crash chain to failure inside _transition). Either counts as
+    //   one action → return true.
     for (const e of this.queue) {
       if (e.status !== 'queue') continue
       if (this.isScopeBusy(e.scope, e.id)) continue
@@ -98,9 +100,10 @@ export class EventFSMController {
     return false
   }
 
-  /** Terminal collapse (→ done/failure): 消费下层 pipeline（取 final + 销毁）是转移副作用，放进 _transition 的 func
-   *  （beforeT{Done|Failure} 之后、改 status 之前）。错误已内建 _transition：veto → 留原态、pipeline 未消费，下拍
-   *  重试；hook bug → _transition 内崩溃链（forceCleanEventUnderLayer 清下层 + 落 failure）。这拍都算有动作。 */
+  /** Terminal collapse (→ done/failure): consuming the lower pipeline (take final + destroy) is a transition
+   *  side-effect, placed in _transition's func (after beforeT{Done|Failure}, before the status change). Errors live
+   *  in _transition: veto → stay, pipeline unconsumed, retried next beat; hook bug → crash chain (forceCleanEventUnderLayer
+   *  + failure). This beat counts as an action either way. */
   private async _terminate(e: EventInstance, ps: 'done' | 'failure', P: PipelineFSMController): Promise<void> {
     await e._transition(ps, [() => {
       const p = P.getByEventId(e.id)

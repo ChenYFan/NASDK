@@ -16,13 +16,14 @@
  */
 
 import { encode as cborEncode, decode as cborDecode } from 'cbor-x'
-import type { Codec, NACPWireMessage } from './types.ts'
+import type { Codec } from './types.ts'
+import type { NACPMessage } from '../NACP/types.ts'
 
 /** The default codec. The whole message (envelope + payload) is encoded in one pass; the encoder walks the
- *  structure and drops Buffers/TypedArrays in as bytes — never understanding what the payload MEANS.
- *  This is the precise sense in which the payload is "semantically opaque, physically traversable": NACP
- *  types it `unknown` (cannot read it), NACT takes the NACPWireMessage view where it is `any` (can walk it). */
+ *  structure and drops Buffers/TypedArrays in as bytes — never understanding what the payload MEANS. That is
+ *  what "semantically opaque, physically traversable" means, and it needs no separate widened view of the
+ *  envelope: cbor-x takes `any`, so a NACPMessage goes in as it stands. */
 export const cborCodec: Codec = {
   encode: (msg) => cborEncode(msg),
-  decode: (data) => cborDecode(data instanceof Uint8Array ? data : new Uint8Array(data)) as NACPWireMessage,
+  decode: (data) => cborDecode(data instanceof Uint8Array ? data : new Uint8Array(data)) as NACPMessage,
 }

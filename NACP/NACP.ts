@@ -37,14 +37,18 @@ import type { Processor } from '../types.ts'
 import type { NACTPeerId, Peer } from '../NACT/types.ts'
 import type { NApp } from '../NApp/NApp.ts'
 import type {
-  BuildOpt, NACPMessage, NACPType, NotifyMessage, RegisterMessage, RegisterPayload, RegisterResponsePayload,
+  AckMessage, BuildOpt, NACPMessage, NACPType, NotifyMessage, RegisterMessage, RegisterPayload, RegisterResponsePayload,
   SubscribePayload, SubscribeResponsePayload, UnsubscribePayload,
-  RequestKind, RequestMessage, ResponseMessage, SubscribeMessage, UnregisterMessage, UnsubscribeMessage,
+  RequestKind, RequestMessage, ResponseMessage, SignalMessage, SignalOpt, SubscribeMessage, UnregisterMessage, UnsubscribeMessage,
 } from './types.ts'
 import { PROTOCOL_V, buildMessage } from './types.ts'
-import { ListenTable, PeerAppConnectionTable, ResponsePendingTable, SubscribeTable } from './tables.ts'
 import {
-  NACPInternal, callProcessName, callResponseName,
+  AckPendingTable, InboundReceivedTable, ListenTable, OutboundBacklogTable,
+  PeerAppConnectionTable, ResponsePendingTable, SubscribeTable, measureBytes,
+} from './tables.ts'
+import type { OutboundRecord } from './tables.ts'
+import {
+  NACPInternal, callProcessName, callResponseName, eventSignalName,
   inboundEvent, outboundEvent,
 } from './events.ts'
 import { NACPError, nacpInbound, nacpOutbound } from './errors.ts'
@@ -53,11 +57,34 @@ import { NACTEvent } from '../NACT/events.ts'
 const RESPONSE_TIMEOUT_MS = 10000          // register / subscribe / unsubscribe: protocol handshakes, must be fast
 const REQUEST_TIMEOUT_MS  = -1             // request: business call — framework has no idea how long it takes; -1 = no timeout
 
+/** The two types that expect no ack: for them, reaching the wire IS the terminal. Everything else waits to be
+ *  acknowledged before it is considered delivered. Kept as one predicate so the rule lives in a single place —
+ *  it is read by the outbound path (does this enter the ack-pending table?), by the inbound path (does this
+ *  earn a dedup record?) and by the backlog's eviction tiers. */
+function expectsAck(type: NACPType): boolean { return type !== 'notify' && type !== 'ack' }
+
 export class NACP {
   private peerAppTable = new PeerAppConnectionTable()
   private pendingTable = new ResponsePendingTable()
   private subscribeTable = new SubscribeTable()   // subscribed side: who subscribed to my bus → notify OUTBOUND
   private listenTable = new ListenTable()         // subscribing side: my own listeners → notify INBOUND
+  /** Outbound stage 1: what could not go out yet. A pass-through while the destination is online. */
+  private backlogTable: OutboundBacklogTable
+  /** Outbound stage 2: what left the wire and is waiting to be acknowledged. */
+  private ackPendingTable: AckPendingTable
+  /** Inbound: ids already handled, so a replayed copy is recognised rather than processed twice. */
+  private inboundReceivedTable: InboundReceivedTable
+  /** One ack clock per App, not per message. The first message to time out condemns the whole App — the rest
+   *  follow it into the backlog — so a per-record timer would be N timers racing to the same conclusion. */
+  private ackTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** One grace clock per offline App. Fires once, at which point that App is forgotten entirely. */
+  private graceTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /** Resolvers waiting for a specific message to reach the wire. This is what makes `notify` / `ack` awaitable
+   *  in the offline case: they cannot wait for an ack (they get none), so their terminal is departure, which
+   *  may be minutes away while a backlog holds them. */
+  private departureWaiters = new Map<string, (sent: boolean) => void>()
+  /** Resolvers waiting for a specific outbound message to be acknowledged. */
+  private ackWaiters = new Map<string, { resolve: (ok: boolean) => void }>()
   /** Reverse reference — NApp's PUBLIC face: id / isGateway / autoMultiGatewayDowngrade / bus / nact /
    *  buildDecl() / getProcessor(). The ONLY thing NACP holds from above. Reading `this.napp.nact` here is
    *  deliberate: the layer being crossed is visible at the call site, and it resolves at call time, so the
@@ -75,6 +102,9 @@ export class NACP {
    *  initialiser, so it exists before the constructor body that news us. */
   constructor(napp: NApp) {
     this.napp = napp
+    this.backlogTable = new OutboundBacklogTable(napp.queueMaxBytes, napp.queueMaxCount)
+    this.ackPendingTable = new AckPendingTable(napp.queueMaxBytes, napp.queueMaxCount)
+    this.inboundReceivedTable = new InboundReceivedTable(napp.queueMaxCount)
     this.napp.bus.listen(NACTEvent.peerDisconnect, ({ peerId }: { peerId: NACTPeerId }) => {
       this.onPeerDisconnect(peerId)
     })
@@ -84,7 +114,12 @@ export class NACP {
   bindAppId(appId: string, peerId: NACTPeerId) { this.peerAppTable.bind(appId, peerId) }
   checkAppId(appId: string): boolean { return this.peerAppTable.has(appId) }
   dropAppId(appId: string) { this.peerAppTable.deleteAppIdbyAppId(appId) }
+  /** Every appId this NACP still knows, reachable or not. */
   listAppId(): string[] { return this.peerAppTable.listAppId() }
+  /** Only the ones reachable right now. What "connected" means to a caller, and what a goodbye can reach:
+   *  sending an unregister to an offline App would queue a message nobody can answer and then wait out its
+   *  handshake timeout. */
+  listOnlineAppId(): string[] { return this.peerAppTable.listOnlineAppId() }
   getAppPeerId(appId: string): NACTPeerId | undefined { return this.peerAppTable.getPeerIdbyAppId(appId) }
   /** Which peer currently serves as this App's outbound fallback (undefined = none). */
   getGatewayPeerId(): NACTPeerId | undefined { return this.peerAppTable.getGatewayPeerId() }
@@ -100,13 +135,13 @@ export class NACP {
    *   'not-declared' — the peer is a plain App, nothing to do
    *   'adopted'      — it is now the fallback
    *   'downgraded'   — it declared Gateway but lost the race; autoMultiGatewayDowngrade is ON so the link
-   *                    stays usable as a plain App link (this is how a NAT-style node holds two Gateways)
+   *                    stays usable as a plain App link (this is how a relay node holds two Gateways)
    *   'conflict'     — same, but the switch is OFF: the caller must unregister and drop the link
    */
   settleGatewayByDeclared(appId: string, peerId: NACTPeerId, peerDeclaredGateway: boolean):
     'not-declared' | 'adopted' | 'downgraded' | 'conflict' {
     if (!peerDeclaredGateway) return 'not-declared'
-    if (this.peerAppTable.setGateway(peerId)) return 'adopted'
+    if (this.peerAppTable.setGateway(peerId, appId)) return 'adopted'
     if (!this.napp.autoMultiGatewayDowngrade) return 'conflict'
     this.napp.bus.emit(NACPInternal.gatewayWarning, {
       appId, peerId, keptGatewayPeerId: this.peerAppTable.getGatewayPeerId(), reason: 'multi-gateway-downgraded',
@@ -130,36 +165,114 @@ export class NACP {
   }
 
   /**
-   * The public outbound face: resolve the destination peer, announce, hand to NACT.
+   * The public outbound face. Two stages sit behind it now, and which one a message stops at is decided by
+   * one question: is the destination reachable right now?
    *
-   * Routing is three-tier (direct connection wins, Gateway is the fallback):
-   *   1. an explicit opt.peerId  — used when the appId table cannot help yet (a register rejection, where
-   *      binding happens only after validation passes, so we answer straight down the inbound peer)
-   *   2. a direct connection to msg.to
-   *   3. the Gateway peer (the star centre is 1 hop from everyone, so it always knows the destination)
-   * Nothing left → nacp:internal:route:error.
+   *   outbound → backlog → [online? straight out] → ack-pending → [ack] → done
+   *                        [offline? stays put until the peer returns]
    *
-   * opt.forwarded marks a Gateway passing a foreign packet through. It DUAL-fires: the physical
-   * nacp:outbound:{type} (so "everything leaving this App" stays complete) plus route:forwarded (the
-   * forwarding semantic). Two different questions, both worth answering.
+   * Returns whether the message was ACCEPTED, which is not the same as "left the wire". A message held for an
+   * offline peer returns true — it will go out when that peer comes back, and reporting false would say it was
+   * lost. The three genuine failures still return false: self-addressed, no-route (an appId nobody registered),
+   * send-failed. Callers that need to know about DEPARTURE rather than acceptance await it — see `send`.
    *
-   * Returns whether the message actually reached NACT. The three failures — self-addressed, no-route,
-   * send-failed — each already emit nacp:internal:route:error, so an OBSERVER learns the exact cause from
-   * the bus; the boolean is for the CALLER, which otherwise had no way to tell a delivered packet from a
-   * dropped one. Same shape as NACT.sendToPeer, which this forwards to.
+   * `no-route` deliberately does NOT queue. An appId that was never registered, or one already forgotten, is a
+   * fact the caller should hear about now: there is no peer coming back for it, so holding its traffic would
+   * only delay the error and grow a queue nobody will ever drain. Queueing is for appIds we KNOW, that are
+   * merely offline — the distinction the link table's offline state exists to make.
    */
-  outbound(msg: NACPMessage, opt?: { peerId?: NACTPeerId; forwarded?: boolean }): boolean {
-    const toPeerId = opt?.peerId ?? this.peerAppTable.getPeerIdbyAppId(msg.to) ?? this.peerAppTable.getGatewayPeerId()
-    this.napp.bus.emit(outboundEvent(msg), { toPeerId, msg })
-    if (opt?.forwarded) this.napp.bus.emit(NACPInternal.gatewaySuccess, { toPeerId, msg, reason: 'forwarded' })
-    // Addressed to ourselves: there is no wire to put it on. Checked BEFORE the peer is used and alongside
-    // no-route rather than ahead of the event, so every attempt to leave is observable. Without it the packet
-    // would miss the appId sheet — an App is never a key in its own — and fall through to the Gateway, which
-    // knows us and would forward it straight back: a round trip ending in local delivery, not the no-op asked for.
+  outbound(msg: NACPMessage, opt?: { peerId?: NACTPeerId; forwarded?: boolean; retransmit?: boolean }): boolean {
+    // An explicit peerId bypasses both stages: it is used when the appId table cannot help yet (a register
+    // rejection, answered straight down the inbound peer before any binding exists). There is no App to be
+    // offline, so there is nothing to queue against.
+    if (opt?.peerId !== undefined) return this.wireOut(msg, opt.peerId, opt)
+
+    // Addressed to ourselves: there is no wire to put it on. Checked first, and before any queueing, because
+    // it can never become deliverable — waiting would not help. Without it the packet would miss the appId
+    // sheet (an App is never a key in its own) and fall through to the Gateway, which knows us and would
+    // forward it straight back: a round trip ending in local delivery, not the no-op asked for.
     if (msg.to === this.napp.id) {
+      this.napp.bus.emit(outboundEvent(msg), { toPeerId: undefined, msg })
       this.napp.bus.emit(NACPInternal.routeError, { msg, reason: 'self-addressed' })
       return false
     }
+
+    // A forwarded packet is not ours: we are a Gateway relaying someone else's traffic, so it earns no
+    // backlog entry and no ack tracking. Its sender is the one holding it for replay.
+    if (opt?.forwarded) {
+      const toPeerId = this.peerAppTable.getPeerIdbyAppId(msg.to) ?? this.peerAppTable.getGatewayPeerId()
+      return this.wireOut(msg, toPeerId, opt)
+    }
+
+    const reachable = this.resolveRoute(msg.to)
+    // Neither known-and-online nor known-and-offline: nothing to wait for.
+    if (reachable === 'unknown') {
+      this.napp.bus.emit(outboundEvent(msg), { toPeerId: undefined, msg })
+      this.napp.bus.emit(NACPInternal.routeError, { msg, reason: 'no-route' })
+      return false
+    }
+
+    // Stage 1. A retransmit is already in the backlog (it was put back there when the link dropped), so it
+    // must not be re-admitted — that would both double-count its bytes and reset its position in the queue.
+    if (!opt?.retransmit) {
+      const rec: OutboundRecord = { msg, destAppId: msg.to, bytes: measureBytes(msg), sentOnce: false }
+      for (const ev of this.backlogTable.add(rec)) {
+        this.napp.bus.emit(NACPInternal.backlogWarning, { msg: ev.rec.msg, reason: ev.reason })
+        this.settleDeparture(ev.rec.msg.id, false)
+      }
+      // The arrival itself was refused by a cap (only ever a notify). It is gone; say so.
+      if (!this.backlogTable.has(msg.id)) return false
+    }
+
+    if (reachable === 'offline') return true    // accepted, held; departure comes with the reconnect
+    return this.popOne(msg.id)
+  }
+
+  /** Is this appId somewhere we can send to, somewhere that will come back, or nowhere at all?
+   *
+   *  A Gateway makes the third case rarer than it looks: with a fallback peer available, an appId we have
+   *  never heard of is still routable, because the star centre is one hop from everyone and knows destinations
+   *  we do not. So `unknown` means "not known to us AND no fallback to ask". */
+  private resolveRoute(appId: string): 'online' | 'offline' | 'unknown' {
+    const state = this.peerAppTable.getState(appId)
+    if (state === 'online') return 'online'
+    if (state === 'offline') return 'offline'
+    return this.peerAppTable.getGatewayPeerId() ? 'online' : 'unknown'
+  }
+
+  /** Take one message out of the backlog and put it on the wire, moving it to stage 2 if it expects an ack.
+   *  Returns whether it reached NACT. */
+  private popOne(msgId: string): boolean {
+    const rec = this.backlogTable.get(msgId)
+    if (!rec) return false
+    const toPeerId = this.peerAppTable.getPeerIdbyAppId(rec.msg.to) ?? this.peerAppTable.getGatewayPeerId()
+    const sent = this.wireOut(rec.msg, toPeerId, {})
+    if (!sent) return false
+
+    this.backlogTable.deleteByAppId(rec.destAppId).forEach((r) => {
+      // Only this one message was meant to leave; put the rest back exactly where they were.
+      if (r.msg.id !== msgId) this.backlogTable.add(r)
+    })
+
+    if (!expectsAck(rec.msg.type)) {
+      // notify / ack are done the moment they depart — there is no acknowledgement coming.
+      this.settleDeparture(rec.msg.id, true)
+      return true
+    }
+    for (const ev of this.ackPendingTable.add(rec)) {
+      this.napp.bus.emit(NACPInternal.ackWarning, { msg: ev.msg, reason: 'pending-overflow' })
+      this.settleAck(ev.msg.id, false)
+    }
+    this.armAckTimer(rec.destAppId)
+    this.settleDeparture(rec.msg.id, true)
+    return true
+  }
+
+  /** The last step before NACT: announce, then hand over. Every attempt to leave is announced, delivered or
+   *  not, so `nacp:outbound:{type}` stays a complete record of what this App tried to send. */
+  private wireOut(msg: NACPMessage, toPeerId: NACTPeerId | undefined, opt: { forwarded?: boolean }): boolean {
+    this.napp.bus.emit(outboundEvent(msg), { toPeerId, msg })
+    if (opt.forwarded) this.napp.bus.emit(NACPInternal.gatewaySuccess, { toPeerId, msg, reason: 'forwarded' })
     if (!toPeerId) {
       this.napp.bus.emit(NACPInternal.routeError, { msg, reason: 'no-route' })
       return false
@@ -169,6 +282,65 @@ export class NACP {
       return false
     }
     return true
+  }
+
+  /** Send and await DEPARTURE. The awaitable form of `outbound` for the two types that get no ack: their
+   *  terminal is reaching the wire, which for an offline destination is however long the peer takes to return.
+   *  Resolves false only when the message can never leave (self-addressed, no-route, or dropped by a cap). */
+  private send(msg: NACPMessage): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      this.departureWaiters.set(msg.id, resolve)
+      if (!this.outbound(msg)) this.settleDeparture(msg.id, false)
+    })
+  }
+
+  /** Send and await the ACK. The awaitable form for types whose terminal is being acknowledged. Resolves
+   *  false when the message can never leave, or when it was given up on (cap eviction, or the App being
+   *  forgotten). */
+  private send4Ack(msg: NACPMessage): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      this.ackWaiters.set(msg.id, { resolve })
+      if (!this.outbound(msg)) this.settleAck(msg.id, false)
+    })
+  }
+
+  private settleDeparture(msgId: string, sent: boolean) {
+    const resolve = this.departureWaiters.get(msgId)
+    if (!resolve) return
+    this.departureWaiters.delete(msgId)
+    resolve(sent)
+  }
+
+  private settleAck(msgId: string, ok: boolean) {
+    const w = this.ackWaiters.get(msgId)
+    if (!w) return
+    this.ackWaiters.delete(msgId)
+    w.resolve(ok)
+  }
+
+  /** Start the ack clock for one App, if it is not already running. One clock per App: the first unacked
+   *  message to expire condemns the App as a whole, so a second clock could only ever reach the same verdict
+   *  later. Rearmed after each ack while anything is still outstanding. */
+  private armAckTimer(appId: string) {
+    if (this.ackTimers.has(appId)) return
+    const t = setTimeout(() => {
+      this.ackTimers.delete(appId)
+      const oldest = this.ackPendingTable.listByAppId(appId)[0]
+      if (!oldest) return
+      this.napp.bus.emit(NACPInternal.ackWarning, { msg: oldest.msg, reason: 'timeout' })
+      // Same verdict as a physical disconnect, reached sooner: on an ordered, lossless transport an ack that
+      // never came means the peer is not processing, so there is nothing to retry against a live link.
+      this.markOffline(appId)
+    }, this.napp.ackTimeoutMs)
+    t.unref?.()
+    this.ackTimers.set(appId, t)
+  }
+
+  /** Stop this App's ack clock, restarting it only if something is still waiting. */
+  private rearmAckTimer(appId: string) {
+    const t = this.ackTimers.get(appId)
+    if (t) { clearTimeout(t); this.ackTimers.delete(appId) }
+    if (this.ackPendingTable.listByAppId(appId).length > 0) this.armAckTimer(appId)
   }
 
   // ── outbound helpers ──
@@ -200,24 +372,45 @@ export class NACP {
    */
   request(
     to: string,
-    opt: { kind: RequestKind; target?: string; payload?: any; onProcess?: (chunk: any) => void },
-  ): Promise<ResponseMessage> {
+    opt: {
+      kind: RequestKind; target?: string; payload?: any
+      onProcess?: (chunk: any) => void; onProcessEnd?: () => void
+    },
+  ): { reqId: string; response: Promise<ResponseMessage> } {
     const msg = this.build('request', to, { kind: opt.kind, target: opt.target, payload: opt.payload }) as RequestMessage
     // event ONLY: ability produces no process stream by definition, so there is nothing to subscribe.
     // Gated on kind ALONE — the same condition the responding side uses, because that is all it can see in the
     // request. An absent onProcess is a listener of `() => {}`, never a missing subscription: were this gated
     // on onProcess too, the peer would still attach its half and notify into a subscription we never filed.
     if (opt.kind === 'event') {
-      this.subscribe(to, callProcessName(opt.kind, msg.id), opt.onProcess, { subId: msg.id, autoSub: true })
+      this.subscribe(to, callProcessName(opt.kind, msg.id), opt.onProcess, {
+        subId: msg.id, autoSub: true, onEnd: opt.onProcessEnd,
+      })
     }
-    return this.Send4Response(msg, to)
+    return { reqId: msg.id, response: this.Send4Response(msg, to) }
   }
 
-  /** Returns whether the notify reached NACT. False means it was never sent (no route, or the peer is gone) —
-   *  the cause is on nacp:internal:route:error. A notify is one-way, so this boolean is the ONLY signal a
-   *  caller gets; there is no response coming to reveal the failure later. */
-  notify(to: string, opt: { parentId: string; targetSubName: string; hitSubName: string; payload?: any }): boolean {
-    return this.outbound(this.build('notify', to, opt))
+  /**
+   * A process chunk, one-way. The one type that expects no ack at all, which is what makes it the cheapest
+   * thing to lose when a queue overflows: its content is observational, and the reliable terminal of any call
+   * is that call's response.
+   *
+   * Resolves when the notify DEPARTS — for an online peer that is immediate, for an offline one it is however
+   * long the peer takes to come back, because the notify waits in the backlog until then. Resolves false only
+   * when it can never leave: no route, addressed to self, or dropped by a cap.
+   */
+  notify(to: string, opt: { parentId: string; targetSubName: string; hitSubName: string; payload?: any }): Promise<boolean> {
+    return this.send(this.build('notify', to, opt))
+  }
+
+  /** Send one reliable input/control message to an active Event request. The Signal has its own message id;
+   *  parentId names the original request, while the ACK names this Signal's id. */
+  signal(to: string, opt: SignalOpt): Promise<boolean> {
+    return this.send4Ack(this.build('signal', to, {
+      parentId: opt.parentId,
+      signalKind: opt.kind,
+      ...(opt.kind === 'normal' && { payload: opt.payload }),
+    }))
   }
 
   /**
@@ -229,19 +422,24 @@ export class NACP {
    * Answering a kind we never opened a subscription for (the no-processor reject) is harmless: onUnsubscribe
    * with autoSub is silent on a missing record.
    *
-   * Returns whether the response reached NACT. The AutoSub teardown runs EITHER WAY — the SubscribeTable half
-   * being closed is ours, so it must go even when the packet could not leave, or a dead peer would leak a
-   * listener on our own bus.
+   * Resolves once the response has been ACKNOWLEDGED — a response is the terminal of somebody's call, so
+   * "delivered" is the only useful meaning of done for it, and departure alone does not establish that.
+   * Resolves false when it can never be delivered.
+   *
+   * The AutoSub teardown runs EITHER WAY, and synchronously: the SubscribeTable half being closed is ours, so
+   * it must go even when the packet cannot leave, or a dead peer would leak a listener on our own bus. It is
+   * also strictly a first-send action — a replay of this response must not close a subscription twice, which is
+   * why the retransmit path goes through `outbound` and never back through here.
    */
   response(
     to: string,
     opt: { parentId: string; isOk: boolean; whyNotOk?: string; kind?: RequestKind; payload?: any },
-  ): boolean {
-    const sent = this.outbound(this.build('response', to, opt))
+  ): Promise<boolean> {
+    const acked = this.send4Ack(this.build('response', to, opt))
     if (opt.kind === 'event') {
       this.onUnsubscribe({ id: opt.parentId, from: to, payload: { targetSubId: opt.parentId } } as UnsubscribeMessage, { autoSub: true })
     }
-    return sent
+    return acked
   }
 
   /**
@@ -390,15 +588,113 @@ export class NACP {
    */
   private registerForwardingListener(parentId: string, subscriber: string, targetSubName: string): string {
     return this.napp.bus.listen(targetSubName, (payload: any, hitSubName: string) => {
-      this.notify(subscriber, { parentId, targetSubName, hitSubName, payload })
+      // Fire-and-forget: a bus listener has nobody to hand a promise to, and a notify that has to wait for an
+      // offline peer must not hold up the emit that produced it.
+      void this.notify(subscriber, { parentId, targetSubName, hitSubName, payload })
     })
   }
 
-  // ── peer cleanup (disconnect or inbound unregister) ──
+  // ── the App link lifecycle: online → offline → gone ──
 
+  /**
+   * An App became unreachable. This is the ONLY response to an unexpected loss, whether the socket dropped or
+   * an ack simply never came: both mean "cannot reach it right now", and neither means "it is never coming
+   * back". So nothing is torn down here.
+   *
+   * Three things happen, and the order matters:
+   *   1. the link is marked offline, snapshotting what the grace expiry will need to decide
+   *   2. whatever was awaiting an ack goes back to the FRONT of the backlog — it left the wire before anything
+   *      queued behind it, so replaying it first is what preserves the order it originally had
+   *   3. the grace clock starts
+   *
+   * Subscriptions are deliberately left running. A peer that returns within the window finds its process
+   * stream intact, and the notifies produced while it was away are in the backlog waiting for it — which is
+   * the whole reason a backlog exists rather than a bare retransmit cache. An async iterable handed out by
+   * `NApp.subscribe` therefore does NOT end on a blip; consumers learn about reachability from
+   * `nacp:internal:napp:success` instead.
+   */
+  private markOffline(appId: string) {
+    if (!this.peerAppTable.markOffline(appId)) return    // unknown, or already offline — the first snapshot wins
+    const t = this.ackTimers.get(appId)
+    if (t) { clearTimeout(t); this.ackTimers.delete(appId) }
+    this.backlogTable.unshiftAll(this.ackPendingTable.drainByAppId(appId))
+    this.armGraceTimer(appId)
+    this.napp.bus.emit(NACPInternal.nappSuccess, { appId, reason: 'offline' })
+  }
+
+  private armGraceTimer(appId: string) {
+    const existing = this.graceTimers.get(appId)
+    if (existing) clearTimeout(existing)
+    const t = setTimeout(() => { this.graceTimers.delete(appId); this.forget(appId, 'grace-expired') }, this.napp.reconnectGraceMs)
+    t.unref?.()
+    this.graceTimers.set(appId, t)
+  }
+
+  /**
+   * An App came back. Cancel the countdown, then drain everything held for it — in insertion order, which
+   * after markOffline's unshift puts the previously-unacked messages ahead of anything queued during the
+   * outage.
+   *
+   * Called on a successful register, which is the only evidence that a peer is ready to receive again. Note
+   * the binding itself has already been redone by `bindAppId`, so the link is `online` before this runs.
+   */
+  private resumeApp(appId: string) {
+    const t = this.graceTimers.get(appId)
+    if (t) { clearTimeout(t); this.graceTimers.delete(appId) }
+    for (const rec of this.backlogTable.listByAppId(appId)) this.popOne(rec.msg.id)
+  }
+
+  /**
+   * The App is gone for good: the grace window expired, or it said goodbye. Everything held for it is
+   * discarded and every waiter fails — this is the one place that gives up on a message.
+   *
+   * NACT is treated separately from NACP, and only here. The protocol state always goes; the physical
+   * connection goes only if it existed solely to serve this App:
+   *
+   *   this appId held the Gateway slot     → close the peer (its own link, and the relay everyone used)
+   *   its peerId WAS the Gateway's peerId  → reached THROUGH the Gateway: leave the socket alone
+   *   anything else                        → a direct link of its own: close it
+   *
+   * The middle case is why the decision needs the snapshot taken at disconnect: several appIds share a
+   * Gateway's peerId, and clearing a Gateway's own appId also clears the slot, so by now "was this the
+   * Gateway?" can no longer be asked of live state. Closing on that case would drop every OTHER App behind
+   * the same relay — a single quiet App taking the whole network with it.
+   */
+  private forget(appId: string, reason: 'grace-expired' | 'unregistered') {
+    const snapshot = this.peerAppTable.getSnapshot(appId)
+    const peerId = snapshot?.peerId ?? this.peerAppTable.getPeerIdbyAppId(appId)
+    const wasGateway = snapshot ? snapshot.gatewayAppId === appId : this.peerAppTable.getGatewayAppId() === appId
+    const viaGateway = snapshot !== undefined && snapshot.gatewayPeerId !== undefined
+      && snapshot.peerId === snapshot.gatewayPeerId && !wasGateway
+
+    for (const t of [this.ackTimers.get(appId), this.graceTimers.get(appId)]) if (t) clearTimeout(t)
+    this.ackTimers.delete(appId)
+    this.graceTimers.delete(appId)
+
+    // Give up on everything still queued, then tell each waiter, so no promise is left hanging on an App that
+    // no longer exists.
+    for (const rec of this.backlogTable.deleteByAppId(appId)) {
+      this.settleDeparture(rec.msg.id, false)
+      this.settleAck(rec.msg.id, false)
+    }
+    for (const rec of this.ackPendingTable.deleteByAppId(appId)) this.settleAck(rec.msg.id, false)
+    this.inboundReceivedTable.deleteByAppId(appId)
+
+    this._cleanupPeer(appId)
+    this.napp.bus.emit(NACPInternal.nappSuccess, { appId, reason: 'dropped' })
+
+    // NACT last: closing the socket produces a disconnect event, and by now there is no link record left for
+    // it to act on, so the two cannot chase each other. Idempotent either way — closePeer on an absent peer is
+    // a no-op, and dropPeer only announces when it was the call that removed the row.
+    if (peerId && !viaGateway) void this.napp.nact.closePeer(peerId)
+    void reason
+  }
+
+  /** Drop the NACP-layer state one App owns. Not a lifecycle step of its own — `forget` is — but kept separate
+   *  because `terminate` needs the same teardown without any of the per-App decisions around it. */
   private _cleanupPeer(appId: string) {
     this.peerAppTable.deleteAppIdbyAppId(appId)
-    this.pendingTable.failFor(appId, `peer '${appId}' disconnected`)
+    this.pendingTable.failFor(appId, `peer '${appId}' is gone`)
     // Both halves of every subscription touching that peer go, one table per direction:
     //   subs    — listeners we registered on ITS behalf; off them (this is SubscribeTable's whole purpose)
     //   listens — handlers waiting on notifies FROM it; nothing will ever arrive again, so drop them
@@ -406,14 +702,16 @@ export class NACP {
     this.listenTable.deleteListenRecordbyAppId(appId)
   }
 
-  /** Physical disconnect → NACP-layer cleanup. Private: nothing outside drives this, NACP subscribes to
-   *  `nact:peer:disconnect` in its own constructor. The physical-disconnect semantic stays NACT's event;
-   *  what it means for the protocol (drop the appId, fail its waiters, off its listeners) is this. */
+  /** Physical disconnect → mark unreachable, nothing more. Private: nothing outside drives this, NACP
+   *  subscribes to `nact:peer:disconnect` in its own constructor. The physical-disconnect semantic stays
+   *  NACT's event; what it means for the protocol is `markOffline`.
+   *
+   *  EVERY appId on that peer, not just one: appIds reached through a Gateway share the Gateway's peerId, so
+   *  handling a single one left the rest marked reachable over a connection that no longer exists. This is
+   *  also the Gateway cascade — the relay going down takes everything behind it offline, because that is
+   *  exactly what happened. */
   private onPeerDisconnect(peerId: NACTPeerId) {
-    const appId = this.peerAppTable.getAppIdbyPeerId(peerId)
-    if (!appId) return
-    this._cleanupPeer(appId)
-    this.napp.bus.emit(NACPInternal.nappSuccess, { appId, reason: 'dropped' })
+    for (const appId of this.peerAppTable.listAppIdbyPeerId(peerId)) this.markOffline(appId)
   }
 
   // ── inbound ──
@@ -436,15 +734,65 @@ export class NACP {
       return
     }
 
+    // An ack answers nothing and is answered by nothing — it settles a record and stops. Handled before the
+    // ack-and-dedup layers below precisely so it cannot enter them: acking an ack is the infinite regress the
+    // whole scheme rests on not doing.
+    if (msg.type === 'ack') return this.onAck(msg)
+
+    // Layer 1 — the protocol-level receipt, sent BEFORE any handling. It says "this arrived", which is a fact
+    // about the wire, not about the work: the peer needs it to release its copy whether or not we go on to
+    // find a consumer. Sending it before the dedup check is what makes a replay harmless — the copy is
+    // acknowledged again (so the sender stops resending) but handled only once.
+    //
+    // register is the exception, and only because of ordering: there is no appId binding yet, so an ack here
+    // would have no route. `onRegister` sends it down the inbound peer once the handshake passes.
+    if (msg.type !== 'register') this.sendAck(msg)
+
+    // Layer 2 — a replay of something already handled. Not an error: it means our earlier ack was lost, or the
+    // link dropped before the sender saw it. Stopping here is what keeps handling exactly-once.
+    if (expectsAck(msg.type) && this.inboundReceivedTable.has(msg.id)) return
+    if (expectsAck(msg.type)) this.inboundReceivedTable.add(msg.id, msg.from)
+
+    // Layer 3 — the business handling.
     switch (msg.type) {
       case 'register':    return this.onRegister(msg, peer)
       case 'unregister':  return this.onUnregister(msg)
       case 'response':    return this.onResponse(msg)
       case 'request':     return this.onRequest(msg)
+      case 'signal':      return void this.onSignal(msg)
       case 'notify':      return this.onNotify(msg)
       case 'subscribe':   return this.onSubscribe(msg)
       case 'unsubscribe': return this.onUnsubscribe(msg)
     }
+  }
+
+  /**
+   * Acknowledge one inbound message. Fire-and-forget by design: an ack expects nothing back, so there is
+   * nothing to await and no failure worth reporting to a caller — if it cannot leave, the sender's own ack
+   * timeout is what notices, which is exactly the signal that mechanism exists to produce.
+   *
+   * A register's ack is the one that cannot be routed by appId: the binding does not exist until the handshake
+   * passes, so it goes straight down the peer it arrived on. Same reason its rejection response does.
+   */
+  private sendAck(msg: NACPMessage, peerId?: NACTPeerId) {
+    const ack = this.build('ack', msg.from, { parentId: msg.id })
+    if (msg.type === 'register' && peerId !== undefined) this.outbound(ack, { peerId })
+    else this.outbound(ack)
+  }
+
+  /**
+   * An inbound ack: the message it names has been received by the far end, so this side can let go of it.
+   *
+   * No consumer means the id is not one we are holding — a duplicate ack, or one for something already given
+   * up on. Reported and dropped, never answered: replying would start a chain that has no terminal. This is
+   * the ack-side twin of a response arriving with no waiter.
+   */
+  private onAck(msg: AckMessage) {
+    const rec = this.ackPendingTable.settle(msg.meta.parentId)
+    if (!rec) return void this.napp.bus.emit(NACPInternal.ackError, { msg, reason: 'has-no-consumer' })
+    this.settleAck(rec.msg.id, true)
+    // The clock is per-App and only needs to run while something is outstanding.
+    this.rearmAckTimer(rec.destAppId)
   }
 
   private onRegister(msg: RegisterMessage, peer: Peer) {
@@ -469,7 +817,11 @@ export class NACP {
     if (msg.v.major !== PROTOCOL_V.major) return reject('version-mismatch')
     // Reject the NEW one, keep the old: with one connection per App, evicting the old would let two
     // same-appId processes kick each other in a loop. The zombie case is handled by NACT disconnect detection.
-    if (this.checkAppId(from)) return reject('appId-in-use')
+    //
+    // An OFFLINE appId is the opposite case and must not be refused: this register IS the reconnect the grace
+    // window was held open for. Only a live binding is a conflict.
+    if (this.peerAppTable.isOnline(from)) return reject('appId-in-use')
+    const returning = this.peerAppTable.getState(from) === 'offline'
 
     this.bindAppId(from, peerId)
     // Whether this peer becomes our fallback is decided by ITS declaration, never by a local override.
@@ -480,18 +832,35 @@ export class NACP {
       return reject('multi-gateway')
     }
     this.napp.bus.emit(NACPInternal.nappSuccess, { appId: from, reason: 'bound', isGateway: gatewayVerdict === 'adopted' })
+    // The handshake arrived over a peer that had no binding yet, so its ack could not be routed by appId at
+    // the point `inbound` would normally have sent one. Now that the binding exists, it can go.
+    this.sendAck(msg, peerId)
     // This response completes the symmetric exchange: our own decl + isGateway, so the dialler learns our
     // capabilities and whether we are the Gateway in the SAME round trip — no follow-up introduce needed.
     // Both belong only to this response, so they ride the typed payload rather than the shared meta.
-    this.response(from, { parentId: msg.id, isOk: true,
+    void this.response(from, { parentId: msg.id, isOk: true,
       payload: { isGateway: this.napp.isGateway, decl: this.napp.buildDecl() } satisfies RegisterResponsePayload })
+    // Last, because it puts held traffic on the wire: the handshake answer should precede the backlog it
+    // unblocks, or the peer would receive replayed messages before the response that says it is registered.
+    if (returning) this.resumeApp(from)
   }
 
+  /**
+   * A peer is leaving on purpose. Unlike a disconnect this is not "unreachable for now" — the peer said it is
+   * done, so there is nothing to hold for it and no grace window to run. Everything queued for it goes.
+   *
+   * The answer goes out BEFORE the cleanup, and the ordering is load-bearing twice over: the route must still
+   * exist for the response to leave at all, and `forget` discards this App's queue — including anything not yet
+   * on the wire. Answering first is what keeps the goodbye itself from being thrown away.
+   *
+   * Not awaited. Waiting for the ack of a response to an unregister would mean waiting for a peer that is
+   * already tearing itself down; the response reaching the wire is as much confirmation as this exchange can
+   * have. Its own ack, if it arrives, finds nothing and is reported as `has-no-consumer` — accurate, since by
+   * then the record really is gone.
+   */
   private onUnregister(msg: UnregisterMessage) {
-    // Answer BEFORE cleanup, while the outbound route still exists.
-    this.response(msg.from, { parentId: msg.id, isOk: true })
-    this._cleanupPeer(msg.from)
-    this.napp.bus.emit(NACPInternal.nappSuccess, { appId: msg.from, reason: 'dropped' })
+    void this.response(msg.from, { parentId: msg.id, isOk: true })
+    this.forget(msg.from, 'unregistered')
   }
 
   /**
@@ -529,9 +898,9 @@ export class NACP {
     const proc: Processor | undefined = this.napp.getProcessor(kind)
     if (!proc) {
       this.napp.bus.emit(NACPInternal.requestError, { msg, reason: 'no-processor' })
-      // Statement, not `return this.response(...)`: response now reports a boolean, and letting it escape
-      // here would leak that into `inbound`'s return type, which has no meaning to give a caller.
-      this.response(msg.from, { parentId: msg.id, isOk: false, whyNotOk: `no-processor for kind '${kind}'`, kind })
+      // Statement, not `return this.response(...)`: response reports delivery, and letting that escape here
+      // would leak it into `inbound`'s return type, which has no meaning to give a caller.
+      void this.response(msg.from, { parentId: msg.id, isOk: false, whyNotOk: `no-processor for kind '${kind}'`, kind })
       return
     }
 
@@ -551,10 +920,26 @@ export class NACP {
         onResponse: (result, isOk, whyNotOk) => {
           this.napp.bus.emit(callResponseName(kind, reqId), { result, isOk, whyNotOk })
           // The AutoSub's closing half rides this response's own outbound — see response().
-          this.response(msg.from, { parentId: reqId, isOk, whyNotOk, kind, payload: result })
+          void this.response(msg.from, { parentId: reqId, isOk, whyNotOk, kind, payload: result })
         },
       },
     )
+  }
+
+  private async onSignal(msg: SignalMessage): Promise<void> {
+    this.napp.bus.emit(eventSignalName(msg.meta.parentId), msg)
+    const proc = this.napp.getProcessor('event')
+    if (!proc) {
+      this.napp.bus.emit(NACPInternal.signalError, { msg, reason: 'no-event-processor' })
+      return
+    }
+    try {
+      await proc.signal(msg.meta.kind === 'normal'
+        ? { signalId: msg.id, reqId: msg.meta.parentId, kind: 'normal', payload: msg.payload }
+        : { signalId: msg.id, reqId: msg.meta.parentId, kind: msg.meta.kind })
+    } catch {
+      this.napp.bus.emit(NACPInternal.signalError, { msg, reason: 'processor-rejected' })
+    }
   }
 
   /**
@@ -597,7 +982,7 @@ export class NACP {
     if (typeof targetSubName !== 'string' || !targetSubName) {
       this.napp.bus.emit(NACPInternal.subscribeError, { msg, reason: 'bad-target-sub-name' })
       if (!autoSub) {
-        this.response(subscriber, {
+        void this.response(subscriber, {
           parentId: subId,
           isOk: false,
           whyNotOk: 'bad-target-sub-name',
@@ -611,7 +996,7 @@ export class NACP {
     // `targetSubId` under the name the cancelling unsubscribe will use, so the subscriber can hand it straight
     // back. Same value as parentId — see SubscribeResponsePayload for why it is stated anyway.
     if (!autoSub)
-      this.response(subscriber, {
+      void this.response(subscriber, {
         parentId: subId, isOk: true, payload: { targetSubId: subId } satisfies SubscribeResponsePayload,
       })
   }
@@ -630,13 +1015,13 @@ export class NACP {
     if (!rec) {
       if (autoSub) return
       this.napp.bus.emit(NACPInternal.subscribeError, { msg, reason: 'unknown-subscription' })
-      // Statement, not `return this.response(...)` — see onRequest: keep response's boolean out of inbound's
+      // Statement, not `return this.response(...)` — see onRequest: keep response's result out of inbound's
       // return type.
-      this.response(msg.from, { parentId: msg.id, isOk: false, whyNotOk: 'unknown-subscription' })
+      void this.response(msg.from, { parentId: msg.id, isOk: false, whyNotOk: 'unknown-subscription' })
       return
     }
     if (rec.listenId) this.napp.bus.off(rec.listenId)
-    if (!autoSub) this.response(msg.from, { parentId: msg.id, isOk: true })
+    if (!autoSub) void this.response(msg.from, { parentId: msg.id, isOk: true })
   }
 
   /** Tear down everything this layer holds: fail every waiter, off every listener, clear every table.
@@ -648,5 +1033,20 @@ export class NACP {
     this.subscribeTable.clear()
     this.listenTable.clear()
     this.peerAppTable.clear()
+    // Every clock, then every queue — and each abandoned message tells its waiter, so shutting down cannot
+    // leave a promise pending on a table that no longer exists.
+    for (const t of this.ackTimers.values()) clearTimeout(t)
+    for (const t of this.graceTimers.values()) clearTimeout(t)
+    this.ackTimers.clear()
+    this.graceTimers.clear()
+    for (const rec of [...this.backlogTable.clear(), ...this.ackPendingTable.clear()]) {
+      this.settleDeparture(rec.msg.id, false)
+      this.settleAck(rec.msg.id, false)
+    }
+    this.inboundReceivedTable.clear()
+    for (const resolve of this.departureWaiters.values()) resolve(false)
+    for (const w of this.ackWaiters.values()) w.resolve(false)
+    this.departureWaiters.clear()
+    this.ackWaiters.clear()
   }
 }

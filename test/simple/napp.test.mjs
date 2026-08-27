@@ -57,7 +57,7 @@ test('simple/napp：一次完整往返', async (t) => {
   })
 
   await t.test('Ability：一问一答', async () => {
-    const res = await client.request('core', { kind: 'ability', target: 'math.add', payload: { a: 20, b: 22 } })
+    const res = await client.request('core', { kind: 'ability', target: 'math.add', payload: { a: 20, b: 22 } }).response
     assert.equal(res.payload, 42)
   })
 
@@ -66,14 +66,14 @@ test('simple/napp：一次完整往返', async (t) => {
     const res = await client.request('core', {
       kind: 'event', target: 'countdown', payload: { from: 3 },
       onProcess: (chunk) => seen.push(chunk.at),
-    })
+    }).response
     assert.deepEqual(seen, [3, 2, 1])
     assert.deepEqual(res.payload, { reached: 0 })
   })
 
   await t.test('失败是 reject，不是返回一条失败响应', async () => {
     await assert.rejects(
-      client.request('core', { kind: 'ability', target: '不存在', payload: {} }),
+      client.request('core', { kind: 'ability', target: '不存在', payload: {} }).response,
       (e) => e.code === 'response-not-ok',
     )
   })
@@ -119,7 +119,7 @@ test('simple/napp：一个 App 同开三种 carrier，调用写法完全一样',
       const cli = new NApp({ id: `cli-${spec.type}` })
       await cli.start()
       await cli.connect('core', spec)          // 只有这一行随 carrier 变
-      const res = await cli.request('core', { kind: 'ability', target: 'math.add', payload: { a: 1, b: 2 } })
+      const res = await cli.request('core', { kind: 'ability', target: 'math.add', payload: { a: 1, b: 2 } }).response
       assert.equal(res.payload, 3)
       await cli.terminate()
     })

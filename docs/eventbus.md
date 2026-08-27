@@ -4,7 +4,7 @@ EventBus 是 NASDK 根级的通用事件总线。
 
 每个组件 `new` 自己的独立实例，各自辖自己的事件命名空间。
 
-和EventEmitter类似，相当于一个简化但特殊实现的EventEmitter。
+它类似 EventEmitter，但是一个简化且做了特殊实现的变体。
 
 ## 快速开始
 

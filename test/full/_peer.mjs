@@ -32,7 +32,7 @@ process.on('message', async (m) => {
       case 'connect':    await app.connect(m.expect, m.spec); return reply(m.id, { ok: true })
       case 'disconnect': return reply(m.id, { dropped: await app.disconnect(m.appId) })
       case 'request': {
-        const res = await app.request(m.to, m.opt)
+        const res = await app.request(m.to, m.opt).response
         return reply(m.id, { ok: true, payload: res.payload })
       }
       case 'bye':        await app.terminate(); process.exit(0)

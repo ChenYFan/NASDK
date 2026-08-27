@@ -7,34 +7,36 @@
 
 import { uid } from '../../utils/id.ts'
 import { PIPELINE_TRANSITIONS, cap, TERMINAL } from '../types.ts'
-import type { PipelineStatus, PipelineStep, PipelineHandler, HookFn, TransitionFunc } from '../types.ts'
+import type { PipelineStatus, PipelineStep, PipelineHandler, NormalSignal, TaskSignal, HookFn, TransitionFunc } from '../types.ts'
 import type { PipelineFSMController } from '../controller/PipelineFSMController.ts'
 import type { TaskInstance } from './TaskInstance.ts'
 import type { EventInstance } from './EventInstance.ts'
 
 /**
- * PipelineInstance —— PipelineHandler.next() 的 `this` 就是它。字段分三档，作者只该碰第三档：
+ * PipelineInstance — the `this` of PipelineHandler.next() (symmetric with TaskInstance: handler is stateless,
+ * state lands on the instance; final lives here, not on the task). Fields in three tiers; authors touch only the third:
  *
- *   身份/输入（运行时冻结，写了抛 TypeError）
- *     id      本实例 id
- *     event   本 pipeline 服务的 EventInstance（要 eventId 就取 this.event.id）
- *     handler 跑本实例的 PipelineHandler
- *   框架状态（可写，但**作者不要碰**）
- *     status / result / currentTaskId —— 框架每拍要改。写 status 会绕过 _transition 让状态机与
- *     hook/bus 失同步；写 result.final 会伪造终局。
- *   用户状态（作者唯一该写的地方）
- *     state   任意键值，跨步保存。引用冻结（不能 this.state = {…}）、内容自由读写
- *             （this.state.hits = 0 / this.state.hits++）。随实例销毁，框架不读不清。
+ *   identity/input (runtime-frozen, writes throw TypeError)
+ *     id        this instance id
+ *     event     the EventInstance this pipeline serves (eventId: this.event.id)
+ *     handler   the PipelineHandler running this instance
+ *   framework state (writable, but authors must NOT touch)
+ *     status / result / currentTaskId — rewritten every beat. Writing status bypasses _transition and desyncs
+ *     the state machine from hooks/bus; writing result.final forges a terminal.
+ *   user state (the only place authors should write)
+ *     state    any key/value, survives across steps. Reference frozen (no this.state = {}), contents free
+ *              (this.state.hits = 0). Destroyed with the instance; the framework neither reads nor clears it.
  */
 export class PipelineInstance {
   readonly id!: string
   readonly event!: EventInstance
   readonly handler: PipelineHandler
-  /** 作者的 per-event 状态空间。引用冻结、内容可写——跨步要留的东西写这里。 */
+  /** Author's per-event state space. Reference frozen, contents writable — cross-step state goes here. */
   readonly state!: Record<string, any>
   status: PipelineStatus = 'pending'
   result: { final?: unknown; process?: unknown } = {}
   currentTaskId: string | null = null
+  private operation = Promise.resolve()
 
   private hooks = new Map<string, HookFn<PipelineInstance>[]>()
   private ctrl: PipelineFSMController
@@ -45,6 +47,15 @@ export class PipelineInstance {
     ro('id', uid('pipe')); ro('event', event); ro('state', {})
   }
   getTask(): TaskInstance | null { return this.currentTaskId ? this.ctrl.ref.taskController.get(this.currentTaskId) : null }
+  async signalTask(signal: TaskSignal): Promise<void> { await this.getTask()?.onSignal(signal) }
+  private exclusive<T>(fn: () => T | Promise<T>): Promise<T> {
+    const current = this.operation.then(fn)
+    this.operation = current.then(() => undefined, () => undefined)
+    return current
+  }
+  async _onNormalSIG(signal: NormalSignal): Promise<void> {
+    await this.exclusive(() => this.handler.onNormalSIG?.call(this, signal))
+  }
 
   consume(): unknown {
     const final = this.result.final
@@ -65,13 +76,15 @@ export class PipelineInstance {
   afterTPending(fn: HookFn<PipelineInstance>) { return this.on('afterTPending', fn) }
 
   /**
-   * 转移原语，也是 beforeT hook 的唯一入口，错误处理内建（线性、无 helper）。**返回 boolean：转成 = true；
-   * 没转成（bug 落 failure）= false**。log 一律发（含同态：running→running 派新 task 是有效迁移）；仅「改 status 值」
-   * 在同态时跳过。**pipeline 一个 veto 点都没有**：done/failure/paused 由下层 task 终态逼定（既成事实）；running
-   * （派下一个 task）是 handler.next() 驱动的自动流转、不该被 hook 拦（veto 会致 next() 重放 / running→running 混乱）。
-   * 故 beforeT 抛任何东西（含 VetoT）都当 hook bug：emit error → 若原转移本就往 failure 则删本层 beforeTFailure
-   * （破递归）→ 递归 `_transition('failure')` 落本层 failure → return false。pipeline 层崩溃无活 task（没派 / 已
-   * consume / 已终态），故只本层 failure、靠 tick 被 event consume 冒泡同步，**不 forceCleanEventUnderLayer**。
+   * Transition primitive, the only beforeT-hook entry; error handling inlined. Returns boolean: transitioned=true;
+   * crashed-to-failure=false. Log always fires (incl. same-state: running→running dispatching a new task is a real
+   * move); only the status assignment is skipped when same. **The pipeline has NO veto point**: done/failure/paused
+   * are forced by the lower task's terminal state (already fact); running (dispatching the next task) is automatic
+   * flow driven by handler.next() and must not be blocked (a veto would replay next() / break running→running).
+   * So any beforeT throw (incl. VetoT) is a hook bug: emit error → if the original target was failure delete
+   * beforeTFailure (break recursion) → recursive _transition('failure') → false. A pipeline crash has no live task
+   * (not yet dispatched / already consumed / terminal), so only layer-failure, bubbled to the event by the tick's
+   * consume — never forceCleanEventUnderLayer.
    */
   async _transition(to: PipelineStatus, funcs?: TransitionFunc[]): Promise<boolean> {
     const same = this.status === to
@@ -81,7 +94,7 @@ export class PipelineInstance {
     try {
       await this.ctrl.ref.THookHandler('pipeline', to, 'before', this.id, this, this.hooks.get(`beforeT${c}`))
     } catch (err) {
-      // pipeline 无 veto 点 → 任何抛出（含 VetoT）都是 hook bug：本层 failure 崩溃链
+      // pipeline has no veto point → any throw (incl. VetoT) is a hook bug: layer-failure crash chain
       const msg = (err as any)?.message ?? String(err)
       this.ctrl.ref.emit('error', this.id, { layer: 'pipeline', id: this.id, msg: `beforeT${c} hook threw (pipeline 无 veto 点) → pipeline failure: ${msg}`, opt: { eventId: this.event.id, at: `beforeT${c}`, error: msg } })
       if (to === 'failure') this.hooks.delete('beforeTFailure')
@@ -97,35 +110,39 @@ export class PipelineInstance {
 
   async _dispatch(step: PipelineStep | undefined) {
     if (!step) { await this._transition('failure', [() => { this.result.final = { error: 'pipeline returned nothing' } }]); return }
-    // 派 task 在 transition 内（beforeTRunning hook 之后、改 status 之前）。pipeline 的「派下一个 task」是
-    // handler.next() 驱动的**自动流转**，不是用户该拦的向下转移决策点 → **beforeTRunning 不支持 veto**：
-    // 抛任何东西（含 VetoT）都冒到 _next 的 catch 当普通 failure（重放 next() 会错乱、running→running 也不合
-    // 状态机；要拦某步请在 task 层 beforeTRunning 拦——那里 task 新建、留 pending 天然可重试）。
+    // Dispatching a task happens inside the transition (after the beforeTRunning hook, before the status change).
+    // "Dispatch the next task" is handler.next()'s automatic flow, not a down-transition point users should block
+    // → beforeTRunning does not support veto: any throw (incl. VetoT) bubbles to _next's catch as an ordinary
+    // failure (replaying next() would corrupt, and running→running isn't a valid veto target; to gate a step, veto
+    // at the task layer's beforeTRunning — there the task is newly built and staying pending is naturally retryable).
     await this._transition('running', [() => {
       const t = this.ctrl.ref.taskController.dispatch(this, step)
       this.currentTaskId = t.id
     }])
   }
   async _next(lastResult: unknown) {
-    // pipeline 层崩溃时下层无活 task（没派 / 已 consume / 已终态），故任何抛出（handler.next() 业务错、
-    // dispatch unknown task、beforeTRunning hook bug、甚至 VetoT）都当**普通 failure**：本层转 failure，
-    // 失败结果随后被 event consume、向上冒泡，本层机制自己同步状态。不 forceCleanEventUnderLayer（那只为 event 层
-    // 的活孤儿 task 准备）。
-    try { await this._dispatch(this.handler.next.call(this, lastResult)) }
-    catch (err: any) { await this._transition('failure', [() => { this.result.final = { error: err?.message ?? String(err) } }]) }
+    // A pipeline crash leaves no live task below (not dispatched / already consumed / terminal), so any throw
+    // (handler.next() business error, dispatch of an unknown task, a beforeTRunning hook bug, even VetoT) is an
+    // ordinary failure: this layer goes failure, the failure result is then consumed by the event and bubbles up;
+    // the layer mechanism syncs its own state. No forceCleanEventUnderLayer (that's only for the event layer's
+    // live-orphan tasks).
+    await this.exclusive(async () => {
+      try { await this._dispatch(this.handler.next.call(this, lastResult)) }
+      catch (err: any) { await this._transition('failure', [() => { this.result.final = { error: err?.message ?? String(err) } }]) }
+    })
   }
 
-  /** 暂停链的中段。**返回 boolean：整段成功 = true；本层没转成 paused（hook bug 落 failure）= false**。
-   *  返回 false 时**不动下层 task**——上层 Event.pause 读这个 bool 决定回滚，避免「Event 停在 paused 但
-   *  pipeline 已 failure」的层间错位（那种错位会让 pause() 谎报成功）。 */
+  /** Middle of the pause chain. Returns boolean: whole segment ok=true; this layer didn't reach paused (hook bug →
+   *  failure)=false. On false, do NOT touch the lower task — the upper Event.pause reads this bool to roll back,
+   *  avoiding the "Event paused but pipeline failed" cross-layer skew (which would make pause() lie about success). */
   async _pause(): Promise<boolean> {
     const t = this.getTask()
     if (!(await this._transition('paused'))) return false
     if (t) await t._stop()
     return true
   }
-  /** 恢复链的中段。**返回 boolean：整段成功 = true；本层没转成 running = false**。
-   *  task._restart 先跑（它断言自己是 stopped，不满足就抛），本层再转 running。 */
+  /** Middle of the resume chain. Returns boolean: whole segment ok=true; this layer didn't reach running=false.
+   *  task._restart runs first (it asserts it was stopped, throwing otherwise), then this layer goes running. */
   async _resume(): Promise<boolean> {
     const t = this.getTask()
     if (t) await t._restart()

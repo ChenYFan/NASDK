@@ -15,8 +15,6 @@ export type {
   Transport, TransportSpec, WSOpt, TCPOpt, UnixOpt, ServerOptBase, HeartbeatMs, CompressionKind,
   // the uniform physical-connection abstraction
   NACTPeerId, Peer, Codec, ServerHandle,
-  // the wire view of a NACP message (payload widened unknown → any, for the encoder only)
-  NACPWireMessage,
 } from './types.ts'
 
 // physical-lifecycle event names + payloads (observation surface)

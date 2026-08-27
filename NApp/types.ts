@@ -19,7 +19,7 @@
  * construction time but reads `this.napp.nact` only at CALL time, by which point NApp has built it.
  */
 
-import type { Declaration, NACPMessage } from '../NACP/types.ts'
+import type { Declaration, NACPMessage, ResponseMessage } from '../NACP/types.ts'
 import type { NACTPeerId, Peer, TransportSpec } from '../NACT/types.ts'
 
 /**
@@ -49,7 +49,30 @@ export interface NAppOpts {
     isGateway?: boolean
     /** What to do when a second peer also declares itself a Gateway. The slot is first-come-first-served,
      *  so this decides the loser's fate: true → keep the link, just not as fallback; false (default) →
-     *  unregister and drop it. Set true to run as a NAT-style node holding two Gateway links. */
+     *  unregister and drop it. Set true to run as a relay node holding two Gateway links. */
     autoMultiGatewayDowngrade?: boolean
+    /** How long an outbound message waits for its ack before the destination is declared unreachable.
+     *  An ack is a protocol-level round trip on an already-ordered transport, so this is a link-health
+     *  threshold, not a business timeout — it says nothing about how long a call may take to answer.
+     *  Reaching it marks the appId offline, exactly as a physical disconnect would. */
+    ackTimeoutMs?: number
+    /** How long an offline appId keeps its queued traffic before everything for it is discarded. Spans the
+     *  window in which a peer may come back and have its backlog replayed. */
+    reconnectGraceMs?: number
+    /** Cap on each outbound queue, in bytes and in records. Applied per queue rather than globally: the
+     *  backlog and the ack-pending table are mutually exclusive in practice (one is a pass-through while the
+     *  other holds the in-flight window, and they swap roles on disconnect), so the peak is one queue's worth.
+     *  The byte figure is approximate by design — see measureBytes. */
+    queueMaxBytes?: number
+    queueMaxCount?: number
   }
+}
+
+export interface AbilityRequestHandle {
+  reqId: string
+  response: Promise<ResponseMessage>
+}
+
+export interface EventRequestHandle extends AbilityRequestHandle {
+  process: AsyncIterable<unknown>
 }

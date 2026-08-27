@@ -5,9 +5,9 @@
 
 # NACT
 
-NACT 全称 Nyirusu Application Control **Transparent**，是NASDK中的传输承载层。也可理解为 NACTransport （传输）。
+NACT 全称 Nyirusu Application Control **Transparent**，是 NASDK 的传输承载层，也可理解为 NACTransport（传输）。
 
-NACT的存在意义就是抹平 ws、tcp、unix 三种传输协议的差异，把它们变成一套统一的 JS 出入站接口，统一一套API给协议层(NACP)使用。
+NACT 的存在意义是抹平 ws、tcp、unix 三种传输协议的差异，对外提供一套统一的 JS 出入站接口，供协议层（NACP）使用。
 
 NACT 与 [NACP](./nacp.md)、[NApp](./napp.md) 三者平行，同属 NASDK 直属成员。
 
@@ -21,23 +21,24 @@ NACT 与 [NACP](./nacp.md)、[NApp](./napp.md) 三者平行，同属 NASDK 直�
 | 承载 carrier | 物理线缆类型 `ws` / `tcp` / `unix`，三者全是一等承载 |
 | Peer | NACT 对上暴露的统一物理连接抽象，收发的是对象，不是字节 |
 | peerId | 物理连接标识，建连时铸刻的 uuid。NACP 用它寻址但不理解物理含义 |
-| framer | 分帧器，把 tcp/unix 裸字节流抹成消息流。帧长写在 32B 头内的 `thisFrameSize` |
+| framer | 分帧器，把 tcp/unix 裸字节流还原成消息流。帧长写在 32B 头内的 `thisFrameSize` |
 | 分片 chunking | 把一条大消息切成多个不超过阈值的片，接收方重组，为穿透中间层而非省内存 | 
 
 
 ## 核心能力
 
-**唯一职责**：把 ws / tcp / unix 的收发、连接生命周期、出入站编解码，统一成 Peer 抽象。
+**唯一职责**：把 ws / tcp / unix 的收发、连接生命周期、出入站编解码统一成一个 Peer 抽象，仅此而已。
 
+NACT 不解读消息含义。整条消息在它眼里就是一个大对象——按 CBOR 编码成字节发出去，再解码回对象交上去，全程不知道任何字段是什么意思。能遍历打包不代表理解语义。
 
-NACT不会解读具体含义，整条消息在 NACT 看来就是一个大对象，它按 CBOR 把对象编码成字节发出去、把字节解码回对象交上去，全程不知道任何字段是什么意思。能遍历打包不等于解读语义。
-NACT不会做任何鉴权。Peer 接口只有 `id` / `send` / `close` / `terminate?`，不带 appId、不带用户身份。准入是 Gateway/App 的业务。
-NACT区分Client/Server，但提供给上层的语义不再区分，是全双工的。`listen`被连和 `dial`主动连只是构建 peer 的两条路，建完之后 peer 语义完全一致。
+NACT 不做鉴权。Peer 接口只有 `id` / `send` / `close` / `terminate?`，不带 appId、不带用户身份；准入是 Gateway/App 的业务。
+
+NACT 区分 Client/Server，但对上层语义不区分，全双工。`listen` 被连和 `dial` 主动连只是构建 peer 的两条路，建完之后 peer 语义完全一致。
 
 
 ## 传输协议
 
-三种承载各实现同一套入口，对上只产出统一 Peer：
+三种承载实现同一套入口，对外都只产出一个统一的 Peer：
 
 ```ts
 type Transport = 'ws' | 'tcp' | 'unix'
@@ -69,9 +70,7 @@ NACT 只自行启动入口，不借用外部 server。`listen` 一律由 NACT �
 -->
 
 <!--
-> 曾经设想过一种「借外部已 listen 的 HTTP server 升级 ws」的形态，已废弃。原因不是难做，而是**那种场景根本不需要 NACT**：一个已经自己终结了 HTTP upgrade 的宿主（Nitro/h3 + crossws 之类）手里拿到的已经是一条建好的连接，NACT 在中间除了转发无事可做。那条路应当**直接跳过 NACT**，把自己的 Peer 交给 `NACP.inbound`。
->
-> 代价要说清：跳过 NACT 同时也跳过了 CBOR 编解码、分片重组、心跳三件实事，宿主得自己补齐，否则同一个 NACP 会收到两种线格式的包。 
+> NyirusuProject 曾采用在已有的 HTTPServer（Nitro）上额外升级 WebSocket 来传输 NACP 相关数据，但在设计后我们认为 NACT 不应该介入或升级一个已经在监听的 HTTPServer。未来 NRY 前端设计的时候可能通过 Hook 或 API 的方式虚拟入站直接进入 NACT 层消息，但这一设计仍在考虑。
 -->
 
 <!--AGENT_ATTENTION-- 
@@ -81,11 +80,11 @@ NACT 只自行启动入口，不借用外部 server。`listen` 一律由 NACT �
 - 异常 = 强制断 + 发事件：超限或解码失败 → NACTError → 捕获 → emit nact:peer:error → close。NACT 只强制断，优雅挥手是 NACP 的事。
 -->
 
-分片的目的是穿透TCP/WebSocker中间层（如CDN）。tcp/ws 默认分片、单机 unix 默认不分片。
+分片是为穿透 TCP/WebSocket 的中间层（如 CDN）。tcp/ws 默认分片，单机 unix 默认不分片。
 
 每条消息都带 32B 分片头，接收方据此自动重组，无需握手。
 
-chunkSize 是本地发送策略、不协商，默认 unix 极大值不分片、tcp/ws 100MB。
+`chunkSize` 是本端发送策略、不协商：unix 默认取极大值不分片，tcp/ws 默认 100MB。
 
 ### 分片头
 
@@ -124,7 +123,7 @@ NACT → NACP    nact.host.deliver(msg, peer) -> napp.nacp.inbound(msg, peer)
 NACP → NACT    napp.nacp.outbound(msg, opt?) -> napp.nact.sendToPeer(peerId, msg)
 ```
 
-注意NACT不负责握手，只负责物理层面的链接。
+注意：NACT 不负责握手，只负责物理连接本身。
 
 ## NACT API
 
@@ -173,7 +172,7 @@ NACT 只有一张表，传输抹平层的唯一状态落点。和 NACP 的四张
 
 ## NACT Event
 
-NACT 不持有 bus。NACT 和 NACP 一样，都是监听并挂在 `NApp.EventBus` 上。
+NACT 不持有 bus。和 NACP 一样，它的所有事件都挂到 `NApp.EventBus` 上。
 
 NACT 触发的事件一律以 `nact:` 开头：
 
@@ -201,18 +200,18 @@ NACT 触发的事件一律以 `nact:` 开头：
 
 NACT默认不监听NApp和NACP层的消息。
 
-`nact:peer:connect` 只意味着链接已建立。register 握手还没发生，对端 appId 此时还是未知。
+`nact:peer:connect` 只表示链接已建立——register 握手还没发生，对端 appId 此时还是未知。
 
-`nact:peer:disconnect` 是 NACP 清表的唯一触发源，NACP会订阅此事件，在断连发生时触发AppId和Peer在NACP层的凋零。
+`nact:peer:disconnect` 是 NACP 清表的唯一触发源。NACP 订阅此事件，断连一发生就对 AppId 与 Peer 执行 NACP 层的凋零。
 
 `nact:peer:error`后必定断开对应peer，因此error后一定伴随着一条`nact:peer:disconnect`。
 
 
 ## 备注
 
-CBOR还有一个压缩参数，但不同语言的支持情况有异，该字段暂时保留未启用
+CBOR 还有一个压缩参数，但各语言支持不一，目前保留但未启用。
 
-NACT的有序保证是TCP、UnixSocket、WebSocket天生支持的。NACT没有单独实现发收包序列。
+NACT 的收发有序性靠 TCP、UnixSocket、WebSocket 天生保证，不额外实现发收包序列。
 
 
 ### 性能
@@ -238,9 +237,9 @@ tcp/ws 默认 100MB 分片，unix 默认不分片。
 | ws | 1GB | 不分片 | 2784 | 3027 MB |
 | ws | 1GB | 100MB × 11 | 3931 | **1147 MB** |
 
-> 为什么是11片：
+> 为什么是 11 片：
 >
-> 测试中Payload是完整的1GB，不是1GB-32Byte\*10。默认的切片策略有效paylaod大小是100MB-32B，所以最后会多出32B+32B\*10的数据用最后一个包发送。
+> 测试的 payload 是完整的 1GB，不是「1GB − 32B×10」。默认切片策略下每片有效 payload 为 100MB − 32B，所以最后一块会多带 32B+32B×10 的数据用一个包收尾。
 
 
 <!--AGENT_ATTENTION-- 
@@ -270,7 +269,7 @@ tcp/ws 默认 100MB 分片，unix 默认不分片。
 -->
 
 
-> 早期 `nry_shm.cpp` 采用「大 Buffer 塞共享内存、消息只带引用」的旁路已废弃，CBOR 让二进制直接进 payload 且无需 base64，旁路不再必要，连带砍掉 blob handle、生命周期、sweep、孤儿回收。同机优化就是选 unix 承载，对上层透明。
+> nry_shm.cpp 早期采用 ShareMemory 作为超大二进制的旁路传输，但在 NACT 优化后不再需要。最新的 NACT 采用 CBOR 二进制直接传输，可以避免旁路或 base64 编码带来的开销。
 
 
 ### 编解码
@@ -279,7 +278,7 @@ tcp/ws 默认 100MB 分片，unix 默认不分片。
 
 选型理由两条：
 
-- **不用裸 JSON**：NACT-NACP-NASDK在Nyirusu实际应用时需要传输二进制（ImageEmbedding大约300-500MB），使用JSON只能ShareMemory或者base64。为了统一传输方式故采用CBOR直接快速编码为二进制。
+- **不用裸 JSON**：Nyirusu 实际要传输二进制（ImageEmbedding 约 300–500MB），用 JSON 只能走 ShareMemory 或 base64。为了统一传输方式，采用 CBOR 直接快速编码成二进制。
 - **不用 protobuf**：上层同时要“无 schema 自描述”和“原生二进制且 encoder 能遍历”，protobuf 二者只能得一。CBOR 的 map 一条消息内同时满足，是 IETF RFC 8949，无需 codegen。
 
 实测数据 base64 总耗时是 CBOR 的 3~7 倍，且线上体积 +33%。
@@ -291,7 +290,7 @@ tcp/ws 默认 100MB 分片，unix 默认不分片。
 
 默认开启，间隔 30s。可在 TransportSpec 里传 `heartbeat` 覆盖 `-1` 关闭。
 
-如果上一个心跳包还没回来，又该发下一个了，则NACT认为本链接断开。默认情况下断线超时即两倍间隔时间（默认60s）。
+如果上一个心跳还没回来，又该发下一个了，NACT 就认为本链接断开。默认断线超时即两倍间隔时间（默认 60s）。
 
 <!--AGENT_ATTENTION-- 
 - ws 用原生 ping/pong 帧，不是 NACP 消息。判定命中则 `nact:peer:error` + reason `heartbeat-timeout` + 强制断。

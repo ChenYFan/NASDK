@@ -76,8 +76,8 @@ export class NACEB {
     for (const p of opts.pipelineHandlers) this.pipelineHandlers.register(p)
     for (const h of opts.taskHandlers) this.taskHandlers.register(h)
 
-    // THookHandler：触发一个 T 事件 = emit T 事件（readonlyView 骑 this）+ 顺序跑该状态 hook 列表。
-    // 概念上 emit 是 hook 列表第 0 位；实现上先 emit 后跑 hook（等价）。原 _phase。
+    // THookHandler: firing a T event = emit the T event (readonlyView onto `this`) + run that state's hooks in order.
+    // Conceptually emit is hook index 0; in code, emit runs first, then hooks (equivalent). Formerly `_phase`.
     const THookHandler: THookHandlerFn = async (layer, state, ph, id, obj, hks) => {
       this.eventBus.emit(`naceb:${layer}:${state}:${ph}:${id}`, undefined, readonlyView(obj))
       if (!hks) return
@@ -88,7 +88,8 @@ export class NACEB {
       }
     }
 
-    // ref：NACEB 私有能力打包盒，注入给三个 Controller（同一引用）。controller 互引用闭包/惰性读 this，破构造环。
+    // ref: NACEB's private-capability box, injected into the three controllers (the same reference). Controllers
+    // cross-reference each other via closures/lazy reads to break the construction cycle.
     this.ref = {
       THookHandler,
       emit: this._emit,
@@ -156,14 +157,13 @@ export class NACEB {
   consumeEvent(id: string): unknown { return this.eventController.consume(id) }
 
   /**
-   * 私有：**只强清该 event 的下层活孤儿**（task + pipeline）。event 层 beforeT hook 抛非 VetoT 崩溃时，
-   * 由 EventInstance._transition 的崩溃链调用——因为 tick 不从上往下同步，event 崩了下面的 task/pipeline
-   * 是活孤儿，必须自上而下同刻强清。完全阻塞、同刻：
-   *   ① 停 task：findTaskByEventId → 每个 `_stop(true)`（force 绕过 builtin $ task 拒绝；内含 abort + 最多
-   *      等 stopTimeoutMs，超时 emit 告知、execute Promise 后台自生自灭）。
-   *   ② 消费 task（consume：取结果 + 移除）。③ 消费 pipeline（consume）。
-   * **不碰 event 自己的 failure**——那由崩溃链随后的递归 `_transition('failure')` 统一落（三层崩溃链形状一致，
-   * event 只多这一步「先清下层」）。
+   * Private: **force-clean only this event's lower live orphans** (task + pipeline). Called from the event layer's
+   * crash chain when a beforeT hook throws a non-VetoT — because the tick doesn't sync top-down, a crashed event
+   * leaves live child task/pipeline orphans. Fully blocking, same-beat:
+   *   ① stop each task: findTaskByEventId → `_stop(true)` (force bypasses the builtin $ refusal; includes abort +
+   *      wait up to stopTimeoutMs, emitting on timeout while the execute promise lives or dies in the background).
+   *   ② consume the task (take result + remove). ③ consume the pipeline.
+   * **Does not touch the event's own failure** — the crash chain's recursive _transition('failure') settles that.
    */
   private async forceCleanEventUnderLayer(eventId: string): Promise<void> {
     for (const t of this.taskController.findTaskByEventId(eventId)) {
@@ -174,10 +174,10 @@ export class NACEB {
   }
 
   private async alertTick(_from: string = '?') {
-    // 撞锁（ticking=true）直接丢弃这次提醒：不需要 pendingTick/累加器补偿。因为推进的触发源足够冗余
-    // （task 收束提醒 + moved 后的 self 补拍 + 50ms clock 兜底），被丢的提醒总有后续来源接上。
-    // 唯一需要「撞锁不能丢」的场景是 veto 重试，但 veto 走「虚拟 moved」经 self 补拍出口（见
-    // EventInstance._transition），不依赖这条提醒，所以这里丢弃是安全的。
+    // Collision (ticking=true) → drop this reminder; no pendingTick/accumulator needed. The progression sources are
+    // redundant enough (task-term reminder + self re-fire after a moved beat + the 50ms clock) that a dropped reminder
+    // always has a follow-up. The one case that can't be lost is veto retry, but that re-fires via self re-fire (the
+    // "virtual moved" outlet in EventInstance._transition), not this reminder — so dropping here is safe.
     if (this.ticking) return
     this.ticking = true
     let moved = false
@@ -187,11 +187,13 @@ export class NACEB {
       const e = await this.eventController.nextTick()
       moved = t || p || e
     } finally { this.ticking = false }
-    // moved（含 veto 的虚拟 moved）→ 补一拍。这是全局唯一补拍口。
+    // moved (incl. a veto's virtual moved) → re-fire a beat. This is the single re-fire point.
     if (moved) {
       setTimeout(() => this.alertTick('self'), 0) //使用宏队列推进，~3.049ms/4step
-      //queueMicrotask(() => this.alertTick('self')) //使用微队列推进，~2.739ms/4step，对延迟敏感任务可以使用，但是本队列会导致微队列阻塞，网络和IO会受到影响。
-      //this.alertTick('self') //直接推进，~2.367ms/4step。可能有潜在的阻塞风险，此外特别多的tick连续推进会导致栈溢出，非常不建议使用。
+      //queueMicrotask(() => this.alertTick('self')) // microtask progression, ~2.739ms/4step; fine for latency-sensitive
+      //  tasks, but a microtask queue blocks: network and IO suffer.
+      //this.alertTick('self') // direct progression, ~2.367ms/4step. Potential blocking risk; many consecutive pushes
+      //  can overflow the stack. Not recommended.
     }
   }
 

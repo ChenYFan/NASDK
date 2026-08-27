@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import { NACEB, PipelineHandler, TaskHandler, TERMINAL, FIRE4SUBEVENT, WAIT4SUBEVENT } from '../../NACEB/index.ts'
 import { VetoT } from '../../NACEB/errors.ts'
 import { collect, timed, sleep } from '../_kit.mjs'
+import { z } from 'zod'
 
 const SLOW = !!process.env.NASDK_SLOW
 
@@ -450,4 +451,60 @@ test('pause 在响应 abort 的 handler 上是毫秒级 —— 与上一条对�
   await ev.resume()
   await settle(naceb, id)
   drain(naceb)
+})
+
+// ── payloadSchema：task 输入闸门 ──
+//
+// TaskHandler.payloadSchema（可选）在 dispatch 处 safeParse(step.input)。纯闸门：parse 输出丢弃，
+// execute 拿原始 input（多余字段原样留）。拒绝 → 抛 → pipeline failure → event failure（硬失败，不重试）。
+
+/** 声明 payloadSchema 的 task；execute 把实际拿到的 input 原样回吐，供测试检查"多余字段是否还在"。 */
+class Gated extends TaskHandler {
+  name = 'gated'
+  description = '带 payloadSchema 的 task，原样回吐 input'
+  payloadSchema = z.object({ n: z.number() })
+  async execute() { return this.input }
+}
+
+/** 把 event.payload.step 当 step.input 直接喂给目标 task（让测试能精确控制流入形状）。 */
+class ToGated extends PipelineHandler {
+  name = 'toGated'
+  description = '把 payload.step 喂给 gated'
+  next(last) {
+    if (last === undefined) return { task: 'gated', input: this.event.payload.step }
+    return { task: TERMINAL, input: last }
+  }
+}
+
+const buildGated = () => build({
+  pipelines: [new ToGated()],
+  tasks: [new Gated()],
+  alias: [{ eventName: 'gate', pipelineName: 'toGated', description: 'x' }],
+})
+
+test('payloadSchema 拒绝坏输入 → 事件落 failure（不留半个 task）', async () => {
+  const naceb = buildGated()
+  const id = naceb.pushEvent({ name: 'gate', payload: { step: { n: '不是数字' } } }, { bypassIdle: true })
+  await settle(naceb, id)
+  assert.equal(naceb.getEvent(id).status, 'failure', '形状不符 → failure')
+  const final = naceb.consumeEvent(id)
+  assert.match(String(final.error), /input rejected/, 'failure 带 bad-task-input 原因')
+})
+
+test('不填 payloadSchema → 无约束，任意输入放行', async () => {
+  const naceb = build()   // ret / fast 都没声明 payloadSchema
+  const id = naceb.pushEvent({ name: 'go', payload: { task: 'ret', 啥都行: true, n: 'xyz' } }, { bypassIdle: true })
+  await settle(naceb, id)
+  assert.equal(naceb.getEvent(id).status, 'done', '无 schema 的 task 不校验，直接跑完')
+  naceb.consumeEvent(id)
+})
+
+test('纯闸门：多余字段原样进 execute，不被 strip/coerce', async () => {
+  const naceb = buildGated()
+  // n 合法（过闸门），额外带 extra 字段 —— A 语义要求 execute 仍拿到原始 input（含 extra）
+  const id = naceb.pushEvent({ name: 'gate', payload: { step: { n: 42, extra: 'kept', nested: { a: 1 } } } }, { bypassIdle: true })
+  await settle(naceb, id)
+  assert.equal(naceb.getEvent(id).status, 'done')
+  const out = naceb.consumeEvent(id)
+  assert.deepEqual(out, { n: 42, extra: 'kept', nested: { a: 1 } }, 'execute 拿到的是原始 input，多余字段没被 zod strip')
 })

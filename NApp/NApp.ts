@@ -16,7 +16,7 @@
  */
 
 import { EventBus } from '../EventBus.ts'
-import type { AbilityProcessor, Processor } from '../types.ts'
+import type { AbilityProcessor, EventProcessor, Processor } from '../types.ts'
 import { NACP } from '../NACP/NACP.ts'
 import { NACT } from '../NACT/NACT.ts'
 // Concrete Processors, imported as VALUES: NApp assembles them as the stock carriers when a kind is left
@@ -25,13 +25,27 @@ import { NACEB } from '../NACEB/NACEB.ts'
 import { NACAB } from '../NACAB/NACAB.ts'
 import type { ServerHandle, TransportSpec } from '../NACT/types.ts'
 import type {
-  Declaration, NotifyMessage, RequestKind, ResponseMessage,
+  Declaration, NotifyMessage, RequestKind, ResponseMessage, SignalOpt,
 } from '../NACP/types.ts'
 import type { NAppOpts } from './types.ts'
+import type { AbilityRequestHandle, EventRequestHandle } from './types.ts'
 import { appAbilities } from './abilities.ts'
 import { nappInternal, nappOutbound } from './errors.ts'
 import { NAppInternal } from './events.ts'
 import { NotifyStream } from './notifyStream.ts'
+
+type ProcessorByKind = { event: EventProcessor; ability: AbilityProcessor }
+
+/** An ack is a protocol round trip on an already-ordered transport, so 10s is generous by orders of
+ *  magnitude — it is a liveness threshold, not a budget for work. */
+const DEFAULT_ACK_TIMEOUT_MS = 10_000
+/** Long enough to cover a process restart or a network blip, short enough that a peer which is really gone
+ *  does not hold its queued traffic indefinitely. */
+const DEFAULT_RECONNECT_GRACE_MS = 120_000
+/** 4GB holds one message of the largest size the transport permits (NACT caps a frame at 2GiB) with room to
+ *  spare, so the queue can never be too small to retain a single legal message. */
+const DEFAULT_QUEUE_MAX_BYTES = 4 * 1024 * 1024 * 1024
+const DEFAULT_QUEUE_MAX_COUNT = 1024
 
 export class NApp {
   readonly id: string
@@ -39,6 +53,12 @@ export class NApp {
   /** What to do when a SECOND peer also declares itself a Gateway: true → keep the link but not as fallback,
    *  false → treat it as a wiring error and drop it. Same level as isGateway — an App-wide build-time switch. */
   readonly autoMultiGatewayDowngrade: boolean
+  /** The four reliability knobs, resolved once here so NACP reads settled numbers rather than an options
+   *  object it would have to re-default on every use. See NAppOpts for what each one governs. */
+  readonly ackTimeoutMs: number
+  readonly reconnectGraceMs: number
+  readonly queueMaxBytes: number
+  readonly queueMaxCount: number
   /**
    * The shared communication-stack bus. Everything observable about this App flows here: `nacp:*` from the
    * protocol layer, `nact:*` from the transport layer, `napp:*` from this facade.
@@ -78,6 +98,10 @@ export class NApp {
     this.serverSpecs = o.server ?? []
     this.isGateway = o.opt?.isGateway ?? false
     this.autoMultiGatewayDowngrade = o.opt?.autoMultiGatewayDowngrade ?? false
+    this.ackTimeoutMs = o.opt?.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS
+    this.reconnectGraceMs = o.opt?.reconnectGraceMs ?? DEFAULT_RECONNECT_GRACE_MS
+    this.queueMaxBytes = o.opt?.queueMaxBytes ?? DEFAULT_QUEUE_MAX_BYTES
+    this.queueMaxCount = o.opt?.queueMaxCount ?? DEFAULT_QUEUE_MAX_COUNT
 
     // Both children hold ONE thing: `this.napp`, NApp's public face. There is no private-capability box for
     // either of them — everything they need is public here (`bus`, `getProcessor`, each other's one entry
@@ -103,7 +127,9 @@ export class NApp {
   /** The Processor bound for a kind, or undefined if none is. NACP calls this on every inbound request —
    *  `processors` itself stays private so the only way IN is `bindProcessor` (which is also where this App
    *  registers its own abilities); what is public is the LOOKUP, not the table. */
-  getProcessor(kind: RequestKind): Processor | undefined { return this.processors.get(kind) }
+  getProcessor<K extends RequestKind>(kind: K): ProcessorByKind[K] | undefined {
+    return this.processors.get(kind) as ProcessorByKind[K] | undefined
+  }
 
   /** Bind the Processor for a kind. NACP only ever sees the `Processor` contract — it does not import or
    *  know NACEB/NACAB, so anything satisfying the contract can be bound here.
@@ -111,7 +137,7 @@ export class NApp {
    *  Binding an ability processor is also when this App registers its OWN abilities (the `NApp.` family) into
    *  it, through the contract's ordinary `register` port. So a processor you supplied carries them just as a
    *  stock one does, and the processor cannot tell that registration apart from a user's. */
-  bindProcessor(kind: RequestKind, processor: Processor) {
+  bindProcessor<K extends RequestKind>(kind: K, processor: ProcessorByKind[K]) {
     this.processors.set(kind, processor)
     if (kind === 'ability') this.registerOwnAbilities(processor as AbilityProcessor)
   }
@@ -167,18 +193,23 @@ export class NApp {
    *
    * Graceful, in the order the protocol requires:
    *   1. latch `stopping` (irreversible) so no new outbound work starts
-   *   2. send unregister to every connected App and await their acknowledgements (or time out)
-   *   3. fail every remaining waiter, off every listener, clear all four tables
+   *   2. send unregister to every reachable App and await their acknowledgements (or time out)
+   *   3. fail every remaining waiter, off every listener, clear every table and clock
    *   4. drop every peer and close every server entry
    * Steps 2 and 3 are ordered this way so the goodbye goes out while routes still exist.
    *
    * All three stack members name their full teardown `terminate`: NApp stops the App, NACP clears its state,
    * NACT drops its connections. One verb, one meaning — "everything this layer holds, gone".
    */
-  async terminate() {
+  async terminate(opt: { isOnlineOnly?: boolean } = {}) {
     if (this.stopping) return
     this.stopping = true
-    await Promise.allSettled(this.nacp.listAppId().map(appId => this.nacp.unregister(appId)))
+    // Only the reachable ones by default. An offline App is one whose grace window is still running: its
+    // unregister would sit in the backlog with nobody to answer it, and step 2 would then wait out the full
+    // handshake timeout per App before step 3 rejects the waiter anyway. Pass `isOnlineOnly: false` to say
+    // goodbye to them too — correct if a peer might return mid-shutdown, at the cost of that wait.
+    const targets = opt.isOnlineOnly === false ? this.nacp.listAppId() : this.nacp.listOnlineAppId()
+    await Promise.allSettled(targets.map(appId => this.nacp.unregister(appId)))
     this.nacp.terminate()
     await this.nact.terminate()
     this.handles = []
@@ -249,10 +280,40 @@ export class NApp {
    *  Fire-and-forget is simply not awaiting the promise — there is deliberately no `fire` method. */
   request(
     to: string,
+    opt: { kind: 'event'; target?: string; payload?: any; onProcess?: (chunk: any) => void },
+  ): EventRequestHandle
+  request(
+    to: string,
+    opt: { kind: 'ability'; target?: string; payload?: any },
+  ): AbilityRequestHandle
+  request(
+    to: string,
     opt: { kind: RequestKind; target?: string; payload?: any; onProcess?: (chunk: any) => void },
-  ): Promise<ResponseMessage> {
-    if (this.stopping) return Promise.reject(nappOutbound('stopping', 'NApp is stopping'))
-    return this.nacp.request(to, opt)
+  ): EventRequestHandle | AbilityRequestHandle {
+    if (this.stopping) {
+      return { reqId: '', response: Promise.reject(nappOutbound('stopping', 'NApp is stopping')) }
+    }
+    if (opt.kind === 'ability') return this.nacp.request(to, opt)
+
+    let reqId = ''
+    const process = new NotifyStream({
+      onOverflow: (dropped: unknown) => this.bus.emit(NAppInternal.notifyWarning, {
+        appId: to, subId: reqId, targetSubName: `nacp:event:${reqId}:process`, dropped, reason: 'stream-overflow',
+      }),
+    })
+    const call = this.nacp.request(to, {
+      ...opt,
+      onProcess: (chunk) => { opt.onProcess?.(chunk); process.push(chunk) },
+      onProcessEnd: () => process.end(),
+    })
+    reqId = call.reqId
+    return { ...call, process }
+  }
+
+  /** Send a reliable one-way Signal to an active Event request. Resolves when the Signal itself is ACKed. */
+  async signal(to: string, opt: SignalOpt): Promise<boolean> {
+    if (this.stopping) return false
+    return this.nacp.signal(to, opt)
   }
 
   /**
@@ -317,10 +378,13 @@ export class NApp {
     return this.nacp.unsubscribe(to, targetSubId)!
   }
 
-  /** Push one process chunk to a subscriber. Resolves `true` once the frame is handed to NACT, `false` if it
-   *  never left — no route, or the peer is gone (cause on `nacp:internal:route:error`). A notify is one-way,
-   *  so this is the only signal there is; no response will arrive later to reveal the failure.
-   *  Resolves `false` when the App is stopping, for the same reason: nothing was sent. */
+  /** Push one process chunk to a subscriber. Resolves once the notify DEPARTS — immediately for a reachable
+   *  peer, and after the reconnect for one that is merely offline, since the notify waits in the outbound
+   *  backlog until then. Resolves `false` when it can never leave: no route (an appId nobody registered),
+   *  addressed to self, or dropped by a queue cap (notify is the first thing a full queue gives up).
+   *
+   *  A notify expects no ack, so departure is all there is to know: no response will arrive later to reveal
+   *  anything more. Resolves `false` when the App is stopping, for the same reason — nothing was sent. */
   async notify(
     to: string,
     opt: { parentId: string; targetSubName: string; hitSubName: string; payload?: any },
@@ -330,7 +394,9 @@ export class NApp {
   }
 
   /** Answer a request by hand. Normally the Processor's `onResponse` callback does this for you.
-   *  Resolves `true` once the frame is handed to NACT — same contract as `notify`. */
+   *  Resolves once the response has been ACKNOWLEDGED by the peer — a response is the terminal of somebody's
+   *  call, so delivery is the only useful meaning of done for it. Resolves `false` when it can never be
+   *  delivered, or when the App is stopping. */
   async response(
     to: string,
     opt: { parentId: string; isOk: boolean; whyNotOk?: string; kind?: RequestKind; decl?: Declaration; payload?: any },
@@ -346,7 +412,13 @@ export class NApp {
   // — and it left `asyncListenOnce` out, so anyone awaiting an event had to switch to `app.bus` anyway.
   // Observation goes through `app.bus` directly: listen / listenOnce / asyncListenOnce / off / emit.
 
-  /** Every appId currently bound to a peer. Named `list…` like NACT's `listPeerId` — across NASDK, a method
-   *  that returns "all of X" is `listX`. */
-  listConnectedApp(): string[] { return this.nacp.listAppId() }
+  /** The appIds this App can reach. Named `list…` like NACT's `listPeerId` — across NASDK, a method that
+   *  returns "all of X" is `listX`.
+   *
+   *  Reachable ONLY, by default: "connected" is what the name says, and an App whose link dropped is not that
+   *  even while its grace window keeps its queue alive. Pass `isOnlineOnly: false` for every appId still known,
+   *  offline ones included — the view that matters when asking "whose traffic am I still holding?". */
+  listConnectedApp(opt: { isOnlineOnly?: boolean } = {}): string[] {
+    return opt.isOnlineOnly === false ? this.nacp.listAppId() : this.nacp.listOnlineAppId()
+  }
 }

@@ -9,17 +9,22 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import NApp from '../../index.ts'
 
-/** 一个只记录、并自动应答握手族的假 Peer。
- *  自动应答不是装饰：terminate() 会给每个已绑 appId 发 unregister 并等应答，不回就要等满 10s 超时。 */
+/** 一个只记录、自动 ACK 可靠消息并应答握手族的假 Peer。 */
 function fakePeer(app, id = 'p1') {
   const sent = []
   const peer = {
     id,
     send(msg) {
       sent.push(msg)
+      if (msg.type !== 'notify' && msg.type !== 'ack') {
+        queueMicrotask(() => app.nacp.inbound({
+          v: msg.v, type: 'ack', id: `ack-${msg.id}`, from: msg.to, to: msg.from, t: Date.now(),
+          meta: { parentId: msg.id },
+        }, peer))
+      }
       if (['register', 'unregister', 'subscribe', 'unsubscribe'].includes(msg.type)) {
         queueMicrotask(() => app.nacp.inbound({
-          v: msg.v, type: 'response', id: `ack-${msg.id}`, from: msg.to, to: msg.from, t: Date.now(),
+          v: msg.v, type: 'response', id: `response-${msg.id}`, from: msg.to, to: msg.from, t: Date.now(),
           meta: { parentId: msg.id, isOk: true }, payload: {},
         }, peer))
       }
@@ -40,7 +45,7 @@ test('信封：每条消息都带 v/type/id/from/to/t + meta + payload', async (
 
   const m = sent[0]
   assert.equal(m.type, 'notify')
-  assert.deepEqual(m.v, { major: 1, minor: 0 })       // 协议版本，同 major 兼容
+  assert.deepEqual(m.v, { major: 2, minor: 1 })       // 协议版本，同 major 兼容
   assert.equal(m.from, 'me')                           // 端到端，不逐跳改写
   assert.equal(m.to, 'them')
   assert.equal(typeof m.id, 'string')
@@ -63,6 +68,7 @@ test('request 的 meta 带 kind 和 target', async () => {
   // request 的 promise 要等一条真 response 才 settle；假 Peer 不答 request，所以 terminate 会让它 reject。
   // 必须接住，否则测试结束后冒出 unhandledRejection。
   const pending = app.nacp.request('them', { kind: 'ability', target: 'math.add', payload: { a: 1 } })
+    .response
     .catch(() => { /* terminate 时失败，预期行为 */ })
 
   const m = sent.find(x => x.type === 'request')
@@ -82,7 +88,7 @@ test('register 进来：建 appId 表 + 回一条 isOk response', async () => {
   assert.equal(app.nacp.checkAppId('other'), false)
 
   app.nacp.inbound({
-    v: { major: 1, minor: 0 }, type: 'register', id: 'r1', from: 'other', to: 'me', t: Date.now(),
+    v: { major: 2, minor: 1 }, type: 'register', id: 'r1', from: 'other', to: 'me', t: Date.now(),
     meta: {}, payload: { isGateway: false, decl: { events: [], abilities: [] } },
   }, peer)
 
@@ -105,7 +111,7 @@ test('to 不是自己的 register 直接丢弃，不回话', async () => {
   app.nact.addPeer(peer)
 
   app.nacp.inbound({
-    v: { major: 1, minor: 0 }, type: 'register', id: 'r2', from: 'other', to: '别人', t: Date.now(),
+    v: { major: 2, minor: 1 }, type: 'register', id: 'r2', from: 'other', to: '别人', t: Date.now(),
     meta: {}, payload: { isGateway: false, decl: { events: [], abilities: [] } },
   }, peer)
 
@@ -124,7 +130,7 @@ test('unregister 进来：解绑', async () => {
   assert.equal(app.nacp.checkAppId('other'), true)
 
   app.nacp.inbound({
-    v: { major: 1, minor: 0 }, type: 'unregister', id: 'u1', from: 'other', to: 'me', t: Date.now(),
+    v: { major: 2, minor: 1 }, type: 'unregister', id: 'u1', from: 'other', to: 'me', t: Date.now(),
     meta: {}, payload: {},
   }, peer)
 
@@ -139,7 +145,7 @@ test('没有路由时出站返 false，并报 route:error', async () => {
   app.bus.listen('nacp:internal:route:error', (p) => errs.push(p.reason))
 
   // 没 bindAppId，也没有 Gateway 兜底
-  const ok = app.nacp.notify('陌生人', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' })
+  const ok = await app.nacp.notify('陌生人', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' })
   assert.equal(ok, false)
   assert.deepEqual(errs, ['no-route'])
 
@@ -152,7 +158,7 @@ test('发给自己也返 false —— 没有线可以走', async () => {
   const errs = []
   app.bus.listen('nacp:internal:route:error', (p) => errs.push(p.reason))
 
-  const ok = app.nacp.notify('me', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' })
+  const ok = await app.nacp.notify('me', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' })
   assert.equal(ok, false)
   assert.deepEqual(errs, ['self-addressed'])
 
@@ -176,7 +182,7 @@ test('四张表可数：订阅/监听/在途请求', async () => {
 
   // 对端订阅我：SubscribeTable +1
   app.nacp.inbound({
-    v: { major: 1, minor: 0 }, type: 'subscribe', id: 's1', from: 'them', to: 'me', t: Date.now(),
+    v: { major: 2, minor: 1 }, type: 'subscribe', id: 's1', from: 'them', to: 'me', t: Date.now(),
     meta: {}, payload: { targetSubName: 'mine:*' },
   }, peer)
   assert.equal(app.nacp.getSubCount(), 1)
@@ -194,7 +200,7 @@ test('对端订阅我之后，我 bus 上的 emit 会被转成 notify 发回去'
   app.nacp.bindAppId('them', 'p1')
 
   app.nacp.inbound({
-    v: { major: 1, minor: 0 }, type: 'subscribe', id: 'sub-9', from: 'them', to: 'me', t: Date.now(),
+    v: { major: 2, minor: 1 }, type: 'subscribe', id: 'sub-9', from: 'them', to: 'me', t: Date.now(),
     meta: {}, payload: { targetSubName: 'mine:*' },
   }, peer)
 

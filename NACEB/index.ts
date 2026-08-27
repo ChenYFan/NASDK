@@ -19,7 +19,7 @@ export type {
   // status
   EventStatus, PipelineStatus, TaskStatus,
   // contracts
-  PipelineStep,
+  PipelineStep, NormalSignal, TaskSignal,
   EventInterface, PushOpts, SubEventSpec,
   NACEBHooks, EventHooks,
   // event alias (lookup table) + NACP declaration item

@@ -12,10 +12,12 @@ import { NACEB, PipelineHandler, TaskHandler } from '../NACEB/index.ts'
 import { NACAB } from '../NACAB/index.ts'
 
 // ── addresses ──────────────────────────────────────────────────────────────────────────────────────────
-// 18900-18999 reserved for NASDK tests; simple/ owns 189 0x, full/ 191x-193x, edge/ 195x-197x.
+// 18900-18999 reserved for NASDK tests; simple/ owns 189 0x, full/ 189 1x-189 4x, edge/ 189 5x-189 7x.
 export const PORT = {
   napp: 18910, nappB: 18911, nappC: 18912, nappGw: 18913, nappGw2: 18914,
   nacp: 18920, nact: 18921, nactWs: 18922,
+  sig: 18940, sigB: 18941, sigC: 18942, sigD: 18943, sigE: 18944, sigF: 18945,
+  sigG: 18946, sigH: 18947, sigI: 18948, sigJ: 18949,
   edge: 18950, edgeB: 18951, edgeWs: 18952, edgeChunk: 18953, edgeMany: 18954, edgeDead: 18955,
 }
 
@@ -160,7 +162,8 @@ export async function startBare(id, opt) {
 // ── fake peers (layer tests never open a socket) ────────────────────────────────────────────────────────
 
 /**
- * A Peer that records what NACP hands it and answers the four handshake types with an isOk response.
+ * A Peer that records what NACP hands it, acknowledges every reliable message, and answers the four
+ * handshake types with an isOk response.
  *
  * The auto-answer is load-bearing, not cosmetic: `NApp.terminate()` sends an unregister to every bound appId
  * and awaits the ack, so a peer that only records makes teardown wait out the full 10s RESPONSE_TIMEOUT_MS.
@@ -175,12 +178,18 @@ export function fakePeer(app, id = 'fake-peer', { answer = true } = {}) {
     send(msg) {
       sent.push(msg)
       if (!answer) return
+      if (msg.type !== 'notify' && msg.type !== 'ack') {
+        queueMicrotask(() => app.nacp.inbound({
+          v: msg.v, type: 'ack', id: `ack-${msg.id}`, from: msg.to, to: msg.from, t: Date.now(),
+          meta: { parentId: msg.id },
+        }, peer))
+      }
       if (msg.type === 'register' || msg.type === 'unregister'
         || msg.type === 'subscribe' || msg.type === 'unsubscribe') {
         // Microtask, not sync: a real ack always lands on a later turn, and answering inside `send` would let
         // the response arrive before the sender finished filing its pending entry.
         queueMicrotask(() => app.nacp.inbound({
-          v: msg.v, type: 'response', id: `ack-${msg.id}`, from: msg.to, to: msg.from, t: Date.now(),
+          v: msg.v, type: 'response', id: `response-${msg.id}`, from: msg.to, to: msg.from, t: Date.now(),
           meta: { parentId: msg.id, isOk: true }, payload: {},
         }, peer))
       }
@@ -195,7 +204,7 @@ export function fakePeer(app, id = 'fake-peer', { answer = true } = {}) {
  *  (a malformed frame, an unknown subscription, a cross-major version). */
 export function msg(type, { from = 'other', to = 'me', id, meta = {}, payload = {}, v } = {}) {
   return {
-    v: v ?? { major: 1, minor: 0 }, type, id: id ?? `m-${++seq}`,
+    v: v ?? { major: 2, minor: 1 }, type, id: id ?? `m-${++seq}`,
     from, to, t: Date.now(), meta, payload,
   }
 }

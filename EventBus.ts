@@ -2,7 +2,7 @@
  * NASDK EventBus — the root-level generic bus class every NASDK component can `new`.
  *
  * It is a shared IMPLEMENTATION, not a shared INSTANCE. Each part news its own bus and owns an
- * independent event pipeline: the NApp communication stack (NACP + NACT + NApp 门面) shares ONE instance
+ * independent event pipeline: the NApp communication stack (NACP + NACT + the NApp facade) shares ONE instance
  * created with the NApp (carries `nacp:*`; NACT reports physical connect/disconnect onto it), while
  * NACEB news its own separate instance (carries `naceb:*`). NACEB uses this class precisely so it
  * needn't hand-roll a bus — same code, different instance. So "who uses EventBus" is everyone; the
@@ -33,9 +33,9 @@ type Shape = { len: number; mask: boolean[] }   // mask[i] = true ⟺ that segme
 
 /**
  * Read-only Proxy over a live instance, handed to observers as the `this` of a T-event (transition)
- * callback. Reads透传 (fields, getters, and methods all pass through — a method call rebinds `this`
+ * callback. Reads pass through (fields, getters, and methods all pass through — a method call rebinds `this`
  * back to the real target so consume()/start() still work); writes throw. The observation surface is
- * read-only by contract (「naceb 事件内不得修改内容」): an observer may inspect and may call methods,
+ * read-only by contract ("nothing may be modified inside an event"): an observer may inspect and may call methods,
  * but may not mutate framework state (this.status = ... etc.) — that stays the exclusive province of
  * the state machine itself. The real instance is never frozen (the FSM must keep writing status), so
  * the immutability is per-dispatch, enforced by this view rather than on the object.

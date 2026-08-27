@@ -447,7 +447,7 @@ test('三种 carrier 传同一条大消息，结果一致', async (t) => {
   ]) {
     await t.test(name, async () => {
       const { srv, cli, stop } = await startPair(spec)
-      const res = await cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } })
+      const res = await cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } }).response
       assert.equal(res.payload.big.length, big.length)
       assert.equal(res.payload.big, big)
       // Peer 抽象是承载无关的：不管底下是 socket 还是 ws 帧，上面看到的都是一行 peer
@@ -462,7 +462,7 @@ test('自定义 chunkSize 生效：小 chunk 迫使大量分片，消息仍完�
   const spec = tcp(PORT.nact + 7, { chunkSize: 512 })
   const { cli, stop } = await startPair(spec)
   const big = 'C'.repeat(60 * 1024)     // 512 字节一片 → 120+ 片
-  const res = await cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } })
+  const res = await cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } }).response
   assert.equal(res.payload.big, big)
   await stop()
 })
@@ -470,7 +470,7 @@ test('自定义 chunkSize 生效：小 chunk 迫使大量分片，消息仍完�
 test('heartbeat: -1 关闭心跳，连接照常工作', async () => {
   const spec = tcp(PORT.nact + 8, { heartbeat: -1 })
   const { cli, stop } = await startPair(spec)
-  const res = await cli.request('srv', { kind: 'ability', target: 'add', payload: { a: 1, b: 1 } })
+  const res = await cli.request('srv', { kind: 'ability', target: 'add', payload: { a: 1, b: 1 } }).response
   assert.equal(res.payload, 2)
   await stop()
 })

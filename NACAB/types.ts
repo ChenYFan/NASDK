@@ -58,7 +58,7 @@ export abstract class AbilityHandler<R = unknown> {
 export class AbilityInstance {
   readonly id!: string
   readonly input!: unknown
-  /** 本次执行内的临时键值。引用冻结、内容可写。与 NACEB TaskInstance.state 同构。 */
+  /** Per-invocation scratch state. Reference frozen, contents writable. Isomorphic to NACEB TaskInstance.state. */
   readonly state!: Record<string, any>
 
   status: AbilityStatus = 'pending'

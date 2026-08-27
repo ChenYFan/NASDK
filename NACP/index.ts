@@ -17,15 +17,16 @@ export type {
   // envelope
   NACPType, ProtocolVersion, NACPBaseMessage, NACPMessage,
   RegisterMessage, UnregisterMessage, SubscribeMessage, UnsubscribeMessage,
-  NotifyMessage, RequestMessage, ResponseMessage,
+  NotifyMessage, RequestMessage, ResponseMessage, SignalMessage, NormalSignalMessage, ControlSignalMessage, AckMessage,
   // meta tree
   BaseMeta, RegisterMeta, UnregisterMeta, RequestMeta, ResponseMeta, NotifyMeta, SubscribeMeta, UnsubscribeMeta,
+  AckMeta, SignalMeta,
   // payload: every XxxPayload inherits BasePayload; the response family nests under ResponsePayload.
   // ResponsePayloadUnion is what ResponseMessage.payload actually is (adds UnknownPayload, for a request's answer).
   BasePayload, ResponsePayload, ResponsePayloadUnion, UnknownPayload,
   RegisterPayload, UnregisterPayload, SubscribePayload, UnsubscribePayload,
   RegisterResponsePayload, UnregisterResponsePayload, SubscribeResponsePayload, UnsubscribeResponsePayload,
-  RequestKind,
+  RequestKind, SignalKind, SignalOpt,
   // declaration (the skeleton NACP defines; concrete names/semantics belong to NAISDK)
   Event, Ability, EventList, AbilitiesList, Declaration,
   // construction
@@ -36,7 +37,7 @@ export {
   // directional names (one per type — no kind suffix)
   inboundEvent, outboundEvent,
   // call-entity names: one call's process/terminal stream, reqId in the middle
-  eventProcessName, eventResponseName, abilityResponseName,
+  eventProcessName, eventResponseName, eventSignalName, abilityResponseName,
   callWildcard, callProcessName, callResponseName,
   // fixed internal names
   NACPInternal,

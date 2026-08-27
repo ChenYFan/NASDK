@@ -254,7 +254,7 @@ test('1MB 消息过三种承载', async (t) => {
   ]) {
     await t.test(name, async () => {
       const { cli, stop } = await startPair(spec)
-      const [res, ms] = await timed(() => cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } }))
+      const [res, ms] = await timed(() => cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } }).response)
       assert.equal(res.payload.big.length, big.length)
       assert.equal(res.payload.big, big, '字节级一致，不是长度对就算')
       console.log(`    ${rate(`${name} 1MB round-trip`, big.length * 2, ms)}`)
@@ -267,7 +267,7 @@ test('chunkSize=64 逼出大量分片，1MB 仍完整', async () => {
   const spec = tcp(PORT.edgeChunk, { chunkSize: 64 })
   const { cli, stop } = await startPair(spec)
   const big = 'C'.repeat(1024 * 1024)
-  const [res, ms] = await timed(() => cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } }))
+  const [res, ms] = await timed(() => cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } }).response)
   assert.equal(res.payload.big, big)
   console.log(`    ${rate('tcp chunkSize=64 1MB', big.length * 2, ms)}（~${Math.ceil(big.length / 32)} 片）`)
   await stop()
@@ -312,7 +312,7 @@ test('同一连接上 1000 条小消息串行往返', async () => {
 
   const [, ms] = await timed(async () => {
     for (let i = 0; i < N; i++) {
-      const res = await cli.request('srv', { kind: 'ability', target: 'add', payload: { a: i, b: 1 } })
+      const res = await cli.request('srv', { kind: 'ability', target: 'add', payload: { a: i, b: 1 } }).response
       if (res.payload !== i + 1) assert.fail(`第 ${i} 条回来的是 ${res.payload}`)
     }
   })
@@ -326,7 +326,7 @@ test('1000 条消息并发发出，全部回来且不串号', async () => {
   const N = 1000
 
   const [results, ms] = await timed(() => Promise.all(
-    Array.from({ length: N }, (_, i) => cli.request('srv', { kind: 'ability', target: 'add', payload: { a: i, b: 0 } })),
+    Array.from({ length: N }, (_, i) => cli.request('srv', { kind: 'ability', target: 'add', payload: { a: i, b: 0 } }).response),
   ))
   // 每条的回值必须等于自己的入参 —— 这是「回包没串到别人的 pending」的直接证据
   assert.deepEqual(results.map(r => r.payload), Array.from({ length: N }, (_, i) => i))
