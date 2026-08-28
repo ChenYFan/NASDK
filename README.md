@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="./docs/public/NASDK-Dark.png" alt="NASDK" width="160">
+  <img src="./docs/NASDK-Dark.png" alt="NASDK" width="160">
   <h1>NASDK</h1>
   <p>面向长时任务的多应用通信与有限资源工作流运行时</p>
   <span>
