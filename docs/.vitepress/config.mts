@@ -82,7 +82,16 @@ export default defineConfig({
               text: "出站族函数",
               link: "/transport/nacp/outbound",
               items: [
-                { text: "request", link: "/transport/nacp/outbound/request" },
+                {
+                  text: "request",
+                  link: "/transport/nacp/outbound/request",
+                  items: [
+                    {
+                      text: "AutoSubscribe",
+                      link: "/transport/nacp/outbound/request/auto-subscribe",
+                    },
+                  ],
+                },
                 { text: "response", link: "/transport/nacp/outbound/response" },
                 {
                   text: "subscribe",

@@ -58,7 +58,7 @@ Event 除最终响应外，还可以返回过程消息流。
 :::info
 request会自动订阅相关事件的Process流，并通过这两种方式允许用户读取。
 
-详情参阅[AutoSubscribe机制](/transport/nacp/outbound/request/auto-subscribe)
+详情参阅 [AutoSubscribe 机制](/transport/nacp/outbound/request/auto-subscribe)。
 :::
 
 ### 使用回调

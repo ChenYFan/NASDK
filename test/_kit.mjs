@@ -19,6 +19,7 @@ export const PORT = {
   sig: 18940, sigB: 18941, sigC: 18942, sigD: 18943, sigE: 18944, sigF: 18945,
   sigG: 18946, sigH: 18947, sigI: 18948, sigJ: 18949,
   edge: 18950, edgeB: 18951, edgeWs: 18952, edgeChunk: 18953, edgeMany: 18954, edgeDead: 18955,
+  edgeGatewayMany: 18956,
 }
 
 /** A unix socket path unique to this process AND this name, so concurrent runs never share one. */

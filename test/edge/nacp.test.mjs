@@ -308,7 +308,7 @@ test('50 个 App 同时注册到一个 Gateway，路由表全对', async () => {
 })
 
 test('Gateway 转发 500 条并发，全部到位', async () => {
-  const spec = tcp(PORT.edgeB + 1)
+  const spec = tcp(PORT.edgeGatewayMany)
   const { app: gw, stop: stopGw } = await startApp('gw2', { server: [spec], opt: { isGateway: true } })
   const { app: a, stop: stopA } = await startApp('aa')
   const { app: b, stop: stopB } = await startApp('bb')
