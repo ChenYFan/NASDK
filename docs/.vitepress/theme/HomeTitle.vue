@@ -27,7 +27,7 @@ function typeNext() {
 
   if (deleting && text.value === '') {
     deleting = false
-    active.value = (active.value + 1) % lines.length
+    active.value = Math.floor(Math.random() * lines.length)
     timer = setTimeout(typeNext, 260)
     return
   }

@@ -8,6 +8,21 @@ export default defineConfig({
   appearance: "dark",
   cleanUrls: true,
   lastUpdated: true,
+  head: [
+    [
+      "link",
+      {
+        rel: "icon",
+        type: "image/png",
+        sizes: "180x180",
+        href: "/NASDK-180.png",
+      },
+    ],
+    [
+      "link",
+      { rel: "apple-touch-icon", sizes: "180x180", href: "/NASDK-180.png" },
+    ],
+  ],
   themeConfig: {
     logo: {
       light: "/NASDK.png",
@@ -49,6 +64,7 @@ export default defineConfig({
                   text: "进阶",
                   items: [
                     { text: "NApp 生命周期", link: "/napp/advanced/lifecycle" },
+                    { text: "NApp as Gateway", link: "/napp/advanced/gateway" },
                     {
                       text: "NApp 可观测",
                       link: "/napp/advanced/observability",
@@ -71,6 +87,7 @@ export default defineConfig({
         {
           text: "传输与协议",
           items: [
+            { text: "传输层总览", link: "/transport/" },
             { text: "什么是NACP", link: "/transport/nacp" },
             { text: "什么是NACT", link: "/transport/nact" },
           ],

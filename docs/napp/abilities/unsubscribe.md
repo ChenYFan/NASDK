@@ -16,10 +16,10 @@ console.log(response.meta.isOk)
 app.unsubscribe(to, targetSubId)
 ```
 
-| 参数          | 说明                               |
-| ------------- | ---------------------------------- |
-| `to`          | 被订阅 NApp 的 `id`                |
-| `targetSubId` | `subscribe()` 返回的 `call.subId`  |
+| 参数          | 说明                              |
+| ------------- | --------------------------------- |
+| `to`          | 被订阅 NApp 的 `id`               |
+| `targetSubId` | `subscribe()` 返回的 `call.subId` |
 
 `to` 应与建立订阅时传给 `subscribe()` 的目标一致。
 
@@ -33,7 +33,7 @@ await call.response
 
 for await (const message of call.stream) {
   console.log(message.payload)
-  if (message.payload.done) break
+  if (message.payload.done) break // [!code focus]
 }
 ```
 

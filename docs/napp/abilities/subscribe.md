@@ -4,18 +4,7 @@
 
 ```js
 const call = app.subscribe("core", "task:done")
-await call.response
-
-for await (const message of call.stream) {
-  console.log(message.payload)
-}
 ```
-
-:::tip
-应先等待 `response`，确认远端已建立订阅，再依赖后续通知。
-
-这里的 `response` 只表示本次订阅是否建立，与其他 Request 是否结束无关。
-:::
 
 :::danger
 Subscribe能订阅的不仅仅只有`request`，也不仅仅有事件相关。
@@ -49,9 +38,11 @@ const call = app.subscribe("core", "task:*")
 `task:*` 可以匹配 `task:start` 和 `task:done`，但不会跨越多个 `:` 段。
 :::
 
-## 使用回调
+## 监听中途流
 
-```js
+:::code-group
+
+```js [使用回调函数]
 const call = app.subscribe("core", "task:*", (message) => {
   console.log(message.meta.hitSubName, message.payload)
 })
@@ -59,9 +50,7 @@ const call = app.subscribe("core", "task:*", (message) => {
 await call.response
 ```
 
-## 使用迭代器
-
-```js
+```js [使用迭代器]
 const call = app.subscribe("core", "task:*")
 await call.response
 
@@ -70,6 +59,14 @@ for await (const message of call.stream) {
   if (message.payload.done) break
 }
 ```
+
+:::
+
+:::tip
+如果使用迭代器，应当先等待 `response`，确认远端已建立订阅，再依赖后续通知。
+
+这里的 `response` 只表示本次订阅是否建立，与其他 Request 是否结束无关。
+:::
 
 ## 返回值与失败
 

@@ -32,7 +32,7 @@ const app = new NApp({
   id: "client",
 })
 
-await app.start()
+await app.start() // [!code focus]
 ```
 
 即使没有配置 `server`，只主动连接其他 NApp，也必须先调用 `start()`。Client-only NApp 同样需要处理注册握手与自身能力。

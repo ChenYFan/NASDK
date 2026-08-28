@@ -61,9 +61,11 @@ request会自动订阅相关事件的Process流，并通过这两种方式允许
 详情参阅 [AutoSubscribe 机制](/transport/nacp/outbound/request/auto-subscribe)。
 :::
 
-### 使用回调
+### 监听中途流
 
-```js
+::: code-group
+
+```js [使用回调函数]
 const call = app.request("worker", {
   kind: "event",
   target: "countdown",
@@ -74,9 +76,7 @@ const call = app.request("worker", {
 const result = await call.response
 ```
 
-### 使用迭代器
-
-```js
+```js [使用迭代器]
 const call = app.request("worker", {
   kind: "event",
   target: "countdown",
@@ -89,6 +89,8 @@ for await (const message of call.stream) {
 
 const result = await call.response
 ```
+
+:::
 
 :::tip
 迭代器和回调的差异和细节内容基本与[Subscribe用法一致](./subscribe)。

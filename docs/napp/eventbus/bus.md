@@ -16,10 +16,10 @@ const bus = new EventBus()
 bus.emit(key, payload, thisArg?)
 ```
 
-| 参数      | 说明                                      |
-| --------- | ----------------------------------------- |
-| `key`     | 具体事件名，不能包含 `*`                  |
-| `payload` | 传给 Listener 的业务载荷                  |
+| 参数      | 说明                                       |
+| --------- | ------------------------------------------ |
+| `key`     | 具体事件名，不能包含 `*`                   |
+| `payload` | 传给 Listener 的业务载荷                   |
 | `thisArg` | 可选，作为本次 Listener callback 的 `this` |
 
 ```js
@@ -36,13 +36,13 @@ bus.emit("task:done", { taskId: "task-1" })
 const listenerId = bus.listen(key, callback)
 ```
 
+callback 的第二个参数 `hitKey` 是本次实际命中的事件名。每次 `listen()` 都会返回独立的 Listener ID。
+
 ```js
 const listenerId = bus.listen("task:*", (payload, hitKey) => {
   console.log(hitKey, payload)
 })
 ```
-
-callback 的第二个参数 `hitKey` 是本次实际命中的事件名。每次 `listen()` 都会返回独立的 Listener ID。
 
 ## listenOnce
 
@@ -74,10 +74,7 @@ console.log((await pending).result)
 提供 callback 时，Promise 返回 callback 的结果：
 
 ```js
-const pending = bus.asyncListenOnce(
-  "task:done",
-  (payload) => payload.result,
-)
+const pending = bus.asyncListenOnce("task:done", (payload) => payload.result)
 
 bus.emit("task:done", { result: 42 })
 console.log(await pending) // 42
