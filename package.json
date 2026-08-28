@@ -1,6 +1,6 @@
 {
   "name": "@chenyfan/nasdk",
-  "version": "0.1.0",
+  "version": "1.0.3",
   "description": "Nyirusu Application SDK,a general-purpose transport and dispatch framework",
   "author": "CyanFalse",
   "license": "MIT",
@@ -51,10 +51,13 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepublishOnly": "npm run build",
-    "test": "node --experimental-strip-types --test \"test/*/*.test.mjs\"",
-    "test:simple": "node --experimental-strip-types --test \"test/simple/*.test.mjs\"",
-    "test:full": "node --experimental-strip-types --test \"test/full/*.test.mjs\"",
-    "test:edge": "node --experimental-strip-types --test \"test/edge/*.test.mjs\""
+    "test": "node --import tsx --test test/*/*.test.mjs",
+    "test:simple": "node --import tsx --test test/simple/*.test.mjs",
+    "test:full": "node --import tsx --test test/full/*.test.mjs",
+    "test:edge": "node --import tsx --test test/edge/*.test.mjs",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "publishConfig": {
     "access": "public"
@@ -67,7 +70,10 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
-    "typescript": "^5.9.0"
+    "mermaid": "10.9.5",
+    "tsx": "4.20.5",
+    "typescript": "^5.9.0",
+    "vitepress": "1.6.4"
   },
   "engines": {
     "node": ">=20"

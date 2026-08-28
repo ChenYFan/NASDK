@@ -1,14 +1,7 @@
 /**
- * NACT net peer factory — wraps a net.Socket (tcp/unix) into the uniform Peer abstraction.
- *
- * NODE-ONLY, and that is the reason this file exists apart from `peer.ws.ts`: it imports `node:net`, which no
- * browser can provide (there is no raw-socket API). A browser build must never reach this module, so the split
- * is by CARRIER at the file level rather than by a runtime branch inside one factory — an `if` would still
- * leave the `node:net` import for a bundler to resolve.
- *
- * A naked stream has no message boundaries, so this carrier needs the length-carrying header plus the fused
- * stream parser. `peer.ws.ts` gets boundaries free from the ws protocol and therefore looks different — those
- * differences are entirely local to each factory, which is what keeps the carriers interchangeable above here.
+ * NACT net peer factory — wraps a net.Socket (tcp/unix) into the uniform Peer abstraction. NODE-ONLY
+ * (imports node:net; split from peer.ws.ts at the file level so bundlers never resolve it in a browser).
+ * A naked stream has no message boundaries → length-carrying header + fused stream parser.
  */
 
 import type net from 'node:net'
@@ -25,7 +18,7 @@ export function makeNetPeer(host: PeerHost, sock: net.Socket, chunkSize: number,
     send: (msg) => {
       const enc = host.codec.encode(msg)
       splitAndEmit(enc, chunkSize, (header, body) => {
-        // zero-copy send: two writes (self-delimiting header + body subarray) — the body is never concatenated
+        // zero-copy: two writes, the body never concatenated
         sock.write(header)
         sock.write(body)
       })
@@ -34,8 +27,7 @@ export function makeNetPeer(host: PeerHost, sock: net.Socket, chunkSize: number,
     terminate: () => sock.destroy(),
   }
 
-  // Heartbeat for tcp/unix: hand it to OS-level TCP keepalive. The OS runs its own probe/retry schedule, so
-  // the interval is all it takes; half-open connections surface as an ordinary 'close'.
+  // Heartbeat = OS-level TCP keepalive; half-open connections surface as an ordinary 'close'.
   if (heartbeatMs) sock.setKeepAlive(true, heartbeatMs)
 
   const reasm = makeReassembler(

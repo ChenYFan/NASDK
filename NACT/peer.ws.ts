@@ -1,34 +1,17 @@
 /**
- * NACT ws peer factory — wraps a WebSocket into the uniform Peer abstraction.
+ * NACT ws peer factory — wraps a WebSocket into the uniform Peer abstraction. BROWSER-SAFE (no node:* import;
+ * split from peer.net.ts at the file level so bundlers never resolve node:net).
  *
- * BROWSER-SAFE, and that is why it is split from `peer.net.ts`: this file has NO `node:*` import, so a browser
- * build can include it untouched. The seam is at the file level rather than a runtime branch because a bundler
- * resolves imports statically — an `if (isBrowser)` inside one factory would still drag `node:net` in.
- *
- * ONE code path serves both runtimes. It is written against the DOM WebSocket interface only:
- *
- *   addEventListener / binaryType / send / close    — standard in browsers, and the `ws` package implements
- *                                                     them too (it is not just an EventEmitter).
- *   .on() / .ping() / .terminate()                  — `ws`-only, deliberately NOT used here.
- *
- * The cost of that discipline is heartbeat: ping/pong are WebSocket CONTROL frames, and browser JS cannot send
- * or observe them at all. So this factory never pings. Half-open detection is the SERVER's job — a Node server
- * pings, and the browser's protocol stack answers pong on its own without JS involvement. `heartbeatMs` is
- * therefore accepted and ignored, keeping one signature across carriers.
- *
- * One ws message = one fragment (boundaries come free, so no stream parser); send must concat because
- * `send` takes a single contiguous buffer.
+ * Written against the DOM WebSocket interface only (.on/.ping/.terminate are `ws`-only and unused).
+ * Cost: no heartbeat — browser JS cannot send/observe ping control frames; half-open detection is the
+ * SERVER's job. `heartbeatMs` accepted and ignored. One ws message = one fragment; send must concat.
  */
 
 import type { NACPMessage, Peer } from './types.ts'
 import type { PeerHost } from './peer.ts'
 import { FRAG_HEADER, MAX_FRAME_SIZE, checkFragHeader, makeReassembler, splitAndEmit, toHex } from './framing.ts'
 
-/**
- * The slice of the DOM WebSocket interface this factory uses. Declared structurally rather than importing
- * `ws`'s class or relying on DOM lib types: the same shape has to describe a browser's native WebSocket and a
- * `ws` instance, and naming either one would tie a browser build to `ws` or a Node build to the DOM lib.
- */
+/** The slice of the DOM WebSocket interface this factory uses, declared structurally. */
 export interface WSLike {
   binaryType: string
   send(data: Uint8Array): void
@@ -38,18 +21,15 @@ export interface WSLike {
   addEventListener(type: 'error', cb: (ev: any) => void): void
 }
 
-/** Normalise whatever the runtime hands us into one Uint8Array view. Browsers give ArrayBuffer (we set
- *  binaryType), `ws` gives Buffer or ArrayBuffer depending on configuration, and a Buffer is already a
- *  Uint8Array — so the only real conversion is the ArrayBuffer case. Zero-copy in every branch. */
+/** Normalise the runtime's frame into one Uint8Array view (zero-copy in every branch). */
 function asBytes(data: any): Uint8Array | null {
   if (data instanceof Uint8Array) return data
   if (data instanceof ArrayBuffer) return new Uint8Array(data)
-  return null   // Blob (browser default binaryType) or a string frame — neither is a valid NACT fragment
+  return null   // Blob or string frame — not a valid NACT fragment
 }
 
 export function makeWsPeer(host: PeerHost, ws: WSLike, chunkSize: number, _heartbeatMs?: number): Peer {
-  // Must be set before any frame arrives: the browser default is 'blob', which would make every fragment
-  // unreadable synchronously. 'arraybuffer' is understood by browsers and by `ws` alike.
+  // Before any frame arrives: browser default 'blob' would make fragments unreadable synchronously.
   ws.binaryType = 'arraybuffer'
 
   const peer: Peer = {
@@ -57,7 +37,7 @@ export function makeWsPeer(host: PeerHost, ws: WSLike, chunkSize: number, _heart
     send: (msg) => {
       const enc = host.codec.encode(msg)
       splitAndEmit(enc, chunkSize, (header, body) => {
-        // ws.send takes ONE contiguous buffer, so this carrier pays a concat the net one avoids.
+        // ws.send takes ONE contiguous buffer → concat.
         const frame = new Uint8Array(header.length + body.length)
         frame.set(header, 0)
         frame.set(body, header.length)
@@ -65,8 +45,7 @@ export function makeWsPeer(host: PeerHost, ws: WSLike, chunkSize: number, _heart
       })
     },
     close: () => ws.close(),
-    // No `terminate`: that is a `ws` extension with no browser equivalent. NACT's `fail` path falls back to
-    // close() when terminate is absent, so a transport fault still brings the connection down.
+    // No terminate: NACT's fail path falls back to close() when absent.
   }
 
   const reasm = makeReassembler(
@@ -90,8 +69,7 @@ export function makeWsPeer(host: PeerHost, ws: WSLike, chunkSize: number, _heart
     const totalSize = dv.getUint32(20)
     if (totalSize > MAX_FRAME_SIZE) return host.fail(peer, 'frame-too-large')
     const body = frag.subarray(FRAG_HEADER)
-    // ws has native frame boundaries, so thisFrameSize is redundant here — which makes it a free integrity
-    // check: a mismatch means a buggy sender or a truncating middlebox, both of which must not be parsed on.
+    // Native boundaries make this a free integrity check against buggy senders / truncating middleboxes.
     if (dv.getUint32(24) !== frag.length) return host.fail(peer, 'frame-size-mismatch')
     if (offset < 0 || offset + body.length > totalSize) return host.fail(peer, 'fragment-out-of-bounds')
     const dst = reasm.ensure(msgId, totalSize)

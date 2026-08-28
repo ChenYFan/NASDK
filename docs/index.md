@@ -1,0 +1,30 @@
+---
+layout: home
+
+hero:
+  name: Nyirusu Application SDK
+  text: Built for AI Infra
+  tagline: 全双工通信协议与有限资源流式运行时
+  image:
+    light: /NASDK.png
+    dark: /NASDK-Dark.png
+    alt: NASDK
+  actions:
+    - theme: brand
+      text: Deploy Your NApp
+      link: /napp/what-is-nasdk
+    - theme: alt
+      text: Overview
+      link: /design/principles
+
+features:
+  - title: 专为长时流水线而生
+    details: NASDK 能够拆分工作为流水线与原子任务，并允许远程监听、控制事件处理。
+  - title: 浏览器完整支持
+    details: NASDK 将 WebBrowser 也视为可靠运行时，允许在浏览器内构件完整的 NApp 应用。
+  - title: 观测，并介入
+    details: NASDK 提供了完整的Hook与EventBus，能够监听并介入事件处理。
+  - title: 为 AI 运行时设计
+    details: NASDK 专门设计解决传统Infra下双向通讯、运行中宣告和介入难题，非常适合应用于AI Agent和ToolRuntime环境。
+
+---

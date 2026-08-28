@@ -21,14 +21,8 @@ export const nacebOutbound = (code: string, message: string) => new NACEBError('
 
 /**
  * VetoT — the veto control signal, thrown from a beforeT{State} hook to abort THIS transition.
- * It is NOT an error: it's a normal control-flow signal that means "don't transition this beat".
- * NACEB catches it, keeps the instance in its current state, and requests a fresh alertTick so the next
- * beat retries (typically the veto hook mutated a gate first, e.g. blockedBy/scope, so the retry decides differently).
- *
- * Crucially it is distinguished from a real hook bug by TYPE (instanceof VetoT), NOT by message string:
- * any OTHER throw (TypeError, plain Error, NACEBError, …) is treated as an accidental hook failure and
- * routed to failure (terminal) — so a buggy hook can never masquerade as an intentional veto and spin
- * forever. The optional `reason` is human-readable only (goes into the runtime:warning), never matched.
+ * NOT an error: NACEB catches it by TYPE (instanceof), keeps the instance in its current state and retries
+ * next beat. Any OTHER throw is treated as a hook bug → failure (terminal). `reason` is human-readable only.
  */
 export class VetoT extends Error {
   constructor(reason?: string) { super(reason ?? 'vetoed'); this.name = 'VetoT' }

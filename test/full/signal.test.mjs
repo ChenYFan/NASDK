@@ -82,20 +82,20 @@ async function sigPair(port) {
 const fireJob = (cli, payload = {}) =>
   cli.request('srv', { kind: 'event', target: 'job', payload: { log: [], done: false, ...payload } })
 
-test('Event Request 句柄同步给出 reqId，callback 与 process stream 同收首包', async () => {
+test('Event Request 句柄同步给出 reqId，callback 与 stream 同收首包', async () => {
   const server = await startApp('srv', { server: [tcp(PORT.sigJ)] })
   const client = await startApp('cli')
   await client.app.connect('srv', tcp(PORT.sigJ))
   const callback = []
 
   const call = client.app.request('srv', {
-    kind: 'event', target: 'run', payload: { n: 3 }, onProcess: chunk => callback.push(chunk.i),
+    kind: 'event', target: 'run', payload: { n: 3 }, onProcess: message => callback.push(message.payload.i),
   })
   assert.equal(typeof call.reqId, 'string')
   assert.ok(call.reqId.length > 0)
 
   const streamed = []
-  for await (const chunk of call.process) streamed.push(chunk.i)
+  for await (const message of call.stream) streamed.push(message.payload.i)
   const response = await call.response
 
   assert.deepEqual(callback, [0, 1, 2])

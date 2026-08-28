@@ -1,21 +1,7 @@
 /**
- * NACT ws carrier — dial (browser + Node) and listen (Node only).
- *
- * The two halves have OPPOSITE portability, which is the whole shape of this file:
- *
- *   dialWs   — uses the global `WebSocket` constructor. Standard in browsers, and global in Node ≥22. No
- *              import at all, so a browser bundle takes it as-is.
- *   listenWs — needs `node:http` (the upgrade host) and `ws`'s WebSocketServer. Neither exists in a browser,
- *              and "server" is not a thing a browser can be.
- *
- * So `listenWs` reaches its Node-only dependencies through a DYNAMIC import, awaited inside the function body.
- * That is deliberate and is the load-bearing detail: a bundler resolves STATIC imports eagerly, so a top-level
- * `import http from 'node:http'` here would break a browser build even though the browser never calls listen.
- * A dynamic import inside a never-called function is not on any reachable path, so it drops out.
- *
- * A browser cannot listen at all, and the layer above refuses that earlier: `NACT.listen` throws
- * `browser-no-server` before reaching this module. This function's own Node-only-ness is the second line of
- * defence, not the first.
+ * NACT ws carrier — dial (browser global or Node ws) and listen (Node only).
+ * listenWs reaches node:http + ws through a DYNAMIC import inside the function body, so a browser bundle
+ * never resolves them.
  */
 
 import type { PeerHost } from './peer.ts'
@@ -23,11 +9,7 @@ import type { Peer, ServerHandle, TransportSpec } from './types.ts'
 import { makeWsPeer, type WSLike } from './peer.ws.ts'
 import { MAX_FRAME_SIZE } from './framing.ts'
 
-/** Dial a ws peer. BROWSER-SAFE — `WebSocket` is taken off the global, so nothing is imported.
- *
- *  The `maxPayload` / `perMessageDeflate` options the Node side passes are `ws` extensions with no browser
- *  equivalent, so they are simply not passed: a browser enforces its own frame limits, and NACT re-checks
- *  `totalSize` against MAX_FRAME_SIZE on every fragment anyway. */
+/** Dial a ws peer. Browsers use their global; Node versions without one load `ws` dynamically. */
 export async function dialWs(
   host: PeerHost,
   spec: Extract<TransportSpec, { type: 'ws' }>,
@@ -35,7 +17,8 @@ export async function dialWs(
   heartbeat: number | undefined,
 ): Promise<Peer> {
   const url = `ws://${spec.opt.ip}:${spec.opt.port}${spec.opt.path ?? ''}`
-  const ws = new WebSocket(url) as unknown as WSLike & {
+  const WebSocketImpl = globalThis.WebSocket ?? (await import('ws')).WebSocket
+  const ws = new WebSocketImpl(url) as unknown as WSLike & {
     addEventListener(t: string, cb: (ev: any) => void): void
     removeEventListener(t: string, cb: (ev: any) => void): void
   }
@@ -49,11 +32,9 @@ export async function dialWs(
   return makeWsPeer(host, ws, chunkSize, heartbeat)
 }
 
-/** Expose a ws entry. NODE ONLY — see the file header for why the imports are dynamic.
- *
- *  NACT owns its http server. There is deliberately no "borrow an external http server" form — a host that
- *  already terminated the upgrade itself (Nitro/h3 + crossws, say) has nothing left for NACT to do, so that
- *  path skips this layer entirely and hands its own Peer straight to NACP.inbound. */
+/** Expose a ws entry. NODE ONLY — dynamic imports keep node:http/ws out of browser bundles.
+ *  NACT owns its http server; a host that already terminated the upgrade hands its own Peer straight to
+ *  NACP.inbound instead. */
 export async function listenWs(
   host: PeerHost,
   spec: Extract<TransportSpec, { type: 'ws' }>,

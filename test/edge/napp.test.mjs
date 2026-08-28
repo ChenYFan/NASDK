@@ -22,7 +22,6 @@ const PEER = fileURLToPath(new URL('../full/_peer.mjs', import.meta.url))
 
 async function spawnPeer(cfg) {
   const child = fork(PEER, [JSON.stringify(cfg)], {
-    execArgv: ['--experimental-strip-types'],
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   })
   await new Promise((resolve, reject) => {
@@ -58,15 +57,15 @@ async function localApp(id, expect, spec, opt) {
   return app
 }
 
-// ── NotifyStream 缓冲：返回 tuple 的理由 ──
+// ── NotifyStream 缓冲 ──
 
 test('订阅期间到达的 notify 会被缓冲，消费者晚到也不丢', async () => {
   const spec = tcp(PORT.edgeDead)
   const peer = await spawnPeer({ id: 'srv', server: [spec] })
-  const app = await localApp('cli', 'srv', spec)
+  const app = await localApp('cli', 'srv', spec, { queueMaxCount: 16 })
 
-  const [sub, stream] = app.subscribe('srv', 'topic:buffered')
-  await sub                                       // 订阅确立
+  const { response, stream } = app.subscribe('srv', 'topic:buffered')
+  await response                                  // 订阅确立
 
   // 对端连发 10 条，此时本地还没开始迭代 stream
   for (let i = 0; i < 10; i++) await peer.emit('topic:buffered', { i })
@@ -74,8 +73,8 @@ test('订阅期间到达的 notify 会被缓冲，消费者晚到也不丢', asy
 
   // 现在才开始消费 —— 一条都不该少
   const got = []
-  for await (const p of stream) {
-    got.push(p.i)
+  for await (const message of stream) {
+    got.push(message.payload.i)
     if (got.length === 10) break
   }
   assert.deepEqual(got, [...Array(10).keys()], '晚到的消费者拿到了全部缓冲内容，顺序不乱')
@@ -108,8 +107,8 @@ test('NApp 层：不消费的订阅溢出后发 napp:internal:notify:warning', a
   const warns = []
   app.bus.listen(NAppInternal.notifyWarning, (p) => warns.push(p))
 
-  const [sub, stream] = app.subscribe('srv', 'topic:flood')
-  await sub
+  const { response, stream } = app.subscribe('srv', 'topic:flood')
+  await response
   // 故意不迭代 stream，让它涨到溢出
   const N = NOTIFY_BUFFER_MAX + 200
   const [, ms] = await timed(async () => { for (let i = 0; i < N; i++) await peer.emit('topic:flood', { i }) })
@@ -131,13 +130,13 @@ test('2000 条 notify 全程消费，不丢不乱', async () => {
   const peer = await spawnPeer({ id: 'srv', server: [spec] })
   const app = await localApp('cli', 'srv', spec)
 
-  const [sub, stream] = app.subscribe('srv', 'stream:seq')
-  await sub
+  const { response, stream } = app.subscribe('srv', 'stream:seq')
+  await response
 
   const N = 2000
   const got = []
   const consume = (async () => {
-    for await (const p of stream) { got.push(p.i); if (got.length === N) break }
+    for await (const message of stream) { got.push(message.payload.i); if (got.length === N) break }
   })()
 
   const [, ms] = await timed(async () => { for (let i = 0; i < N; i++) await peer.emit('stream:seq', { i }) })
@@ -156,8 +155,8 @@ test('break 出迭代 = 取消订阅：对端订阅记录被清', async () => {
   const peer = await spawnPeer({ id: 'srv', server: [spec] })
   const app = await localApp('cli', 'srv', spec)
 
-  const [sub, stream] = app.subscribe('srv', 'stream:cancel')
-  await sub
+  const { response, stream } = app.subscribe('srv', 'stream:cancel')
+  await response
   const before = (await peer.ask('subcount')).subs
   assert.ok(before >= 1, `对端有订阅记录，实得 ${before}`)
 
@@ -184,15 +183,15 @@ test('100 条并发订阅同一对端，各收各的', async () => {
   const streams = []
   const subs = []
   for (let i = 0; i < N; i++) {
-    const [sub, stream] = app.subscribe('srv', `multi:${i}`)
-    subs.push(sub); streams.push(stream)
+    const { response, stream } = app.subscribe('srv', `multi:${i}`)
+    subs.push(response); streams.push(stream)
   }
   await Promise.all(subs)
 
   // 每条流收自己那个 topic 的一条
   const got = new Array(N).fill(null)
   const consumers = streams.map((s, i) => (async () => {
-    for await (const p of s) { got[i] = p.v; break }
+    for await (const message of s) { got[i] = message.payload.v; break }
   })())
 
   for (let i = 0; i < N; i++) await peer.emit(`multi:${i}`, { v: i })

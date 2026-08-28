@@ -65,10 +65,8 @@ export class NACEB {
     pipelineHandlers: PipelineHandler[]
     taskHandlers: TaskHandler[]
   }) {
-    // Unified internal channel: every runtime signal (transition logs, errors, warnings, process
-    // output) is an EventBus event `naceb:runtime:{level}:{id}` — no injected log closure. An observer
-    // subscribes `naceb:runtime:log:*` (or error/warning/message) to see internals; by default nothing
-    // is printed (a pure bus emit), symmetric with the T-event surface.
+    // Unified internal channel: every runtime signal is an EventBus event `naceb:runtime:{level}:{id}`;
+    // nothing printed by default.
     this._emit = (level, id, payload) => this.eventBus.emit(`naceb:runtime:${level}:${id}`, payload)
     this.eventBus.onError = (key, err) =>
       this.eventBus.emit(`naceb:runtime:error:bus`, { layer: 'bus', id: 'bus', msg: `observer error @${key}: ${(err as any)?.message ?? String(err)}`, opt: { key, error: err } })
@@ -76,8 +74,7 @@ export class NACEB {
     for (const p of opts.pipelineHandlers) this.pipelineHandlers.register(p)
     for (const h of opts.taskHandlers) this.taskHandlers.register(h)
 
-    // THookHandler: firing a T event = emit the T event (readonlyView onto `this`) + run that state's hooks in order.
-    // Conceptually emit is hook index 0; in code, emit runs first, then hooks (equivalent). Formerly `_phase`.
+    // THookHandler: emit the T event (readonlyView onto `this`) + run that state's hooks in order.
     const THookHandler: THookHandlerFn = async (layer, state, ph, id, obj, hks) => {
       this.eventBus.emit(`naceb:${layer}:${state}:${ph}:${id}`, undefined, readonlyView(obj))
       if (!hks) return
@@ -88,8 +85,7 @@ export class NACEB {
       }
     }
 
-    // ref: NACEB's private-capability box, injected into the three controllers (the same reference). Controllers
-    // cross-reference each other via closures/lazy reads to break the construction cycle.
+    // ref: NACEB's private-capability box, injected into the three controllers.
     this.ref = {
       THookHandler,
       emit: this._emit,
@@ -157,27 +153,21 @@ export class NACEB {
   consumeEvent(id: string): unknown { return this.eventController.consume(id) }
 
   /**
-   * Private: **force-clean only this event's lower live orphans** (task + pipeline). Called from the event layer's
-   * crash chain when a beforeT hook throws a non-VetoT — because the tick doesn't sync top-down, a crashed event
-   * leaves live child task/pipeline orphans. Fully blocking, same-beat:
-   *   ① stop each task: findTaskByEventId → `_stop(true)` (force bypasses the builtin $ refusal; includes abort +
-   *      wait up to stopTimeoutMs, emitting on timeout while the execute promise lives or dies in the background).
-   *   ② consume the task (take result + remove). ③ consume the pipeline.
-   * **Does not touch the event's own failure** — the crash chain's recursive _transition('failure') settles that.
+   * Force-clean one event's lower live orphans (task + pipeline), called from the event layer's crash chain.
+   * Fully blocking, same-beat: stop each task (force bypasses the builtin $ refusal) → consume task →
+   * consume pipeline. Does not touch the event's own failure.
    */
   private async forceCleanEventUnderLayer(eventId: string): Promise<void> {
     for (const t of this.taskController.findTaskByEventId(eventId)) {
-      if (t.status === 'running' || t.status === 'pending') await t._stop(true)   // force：连 builtin $ task 也停（内含 abort + 最多等 stopTimeoutMs）
-      t.consume()   // 取结果 + 移除（无守卫，任何态可 consume）
+      if (t.status === 'running' || t.status === 'pending') await t._stop(true)
+      t.consume()
     }
-    this.pipelineController.getByEventId(eventId)?.consume()   // 消费 pipeline
+    this.pipelineController.getByEventId(eventId)?.consume()
   }
 
   private async alertTick(_from: string = '?') {
-    // Collision (ticking=true) → drop this reminder; no pendingTick/accumulator needed. The progression sources are
-    // redundant enough (task-term reminder + self re-fire after a moved beat + the 50ms clock) that a dropped reminder
-    // always has a follow-up. The one case that can't be lost is veto retry, but that re-fires via self re-fire (the
-    // "virtual moved" outlet in EventInstance._transition), not this reminder — so dropping here is safe.
+    // Collision (ticking=true) → drop this reminder; progression sources are redundant enough that a dropped
+    // reminder always has a follow-up (veto retry re-fires via self re-fire, not this reminder).
     if (this.ticking) return
     this.ticking = true
     let moved = false
@@ -187,13 +177,9 @@ export class NACEB {
       const e = await this.eventController.nextTick()
       moved = t || p || e
     } finally { this.ticking = false }
-    // moved (incl. a veto's virtual moved) → re-fire a beat. This is the single re-fire point.
+    // moved → re-fire a beat. This is the single re-fire point.
     if (moved) {
-      setTimeout(() => this.alertTick('self'), 0) //使用宏队列推进，~3.049ms/4step
-      //queueMicrotask(() => this.alertTick('self')) // microtask progression, ~2.739ms/4step; fine for latency-sensitive
-      //  tasks, but a microtask queue blocks: network and IO suffer.
-      //this.alertTick('self') // direct progression, ~2.367ms/4step. Potential blocking risk; many consecutive pushes
-      //  can overflow the stack. Not recommended.
+      setTimeout(() => this.alertTick('self'), 0)
     }
   }
 

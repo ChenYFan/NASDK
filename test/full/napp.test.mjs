@@ -20,7 +20,6 @@ const PEER = fileURLToPath(new URL('./_peer.mjs', import.meta.url))
 /** 起一个对端进程。返回 ask()（发命令等回话）和 stop()。 */
 async function spawnPeer(cfg) {
   const child = fork(PEER, [JSON.stringify(cfg)], {
-    execArgv: ['--experimental-strip-types'],
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   })
   await new Promise((resolve, reject) => {
@@ -268,7 +267,7 @@ test('ability 与 event 端到端，含过程流', async () => {
   const chunks = []
   const ev = await app.app.request('srv', {
     kind: 'event', target: 'run', payload: { task: 'emit', n: 4 },
-    onProcess: (c) => chunks.push(c.i),
+    onProcess: (message) => chunks.push(message.payload.i),
   }).response
   assert.deepEqual(chunks, [0, 1, 2, 3], '过程流按序到齐')
   assert.deepEqual(ev.payload, { emitted: 4 })
@@ -297,12 +296,27 @@ test('多个 event 的过程流不会串台', async () => {
   const boxes = [[], [], []]
   await Promise.all(boxes.map((box, i) => app.app.request('srv', {
     kind: 'event', target: 'run', payload: { task: 'emit', n: i + 2 },
-    onProcess: (c) => box.push(c.i),
+    onProcess: (message) => box.push(message.payload.i),
   }).response))
 
   assert.deepEqual(boxes[0], [0, 1])
   assert.deepEqual(boxes[1], [0, 1, 2])
   assert.deepEqual(boxes[2], [0, 1, 2, 3])
+  await app.stop(); await peer.stop()
+})
+
+test('event request stream 使用 queueMaxCount', async () => {
+  const peer = await spawnPeer({ id: 'srv', server: [tcp(PORT.napp)] })
+  const app = await startApp('cli', { opt: { queueMaxCount: 2 } })
+  await app.app.connect('srv', tcp(PORT.napp))
+
+  const call = app.app.request('srv', { kind: 'event', target: 'run', payload: { task: 'emit', n: 4 } })
+  await call.response
+  assert.equal(call.stream.pending, 2)
+
+  const got = []
+  for await (const message of call.stream) got.push(message.payload.i)
+  assert.deepEqual(got, [2, 3])
   await app.stop(); await peer.stop()
 })
 
@@ -367,24 +381,40 @@ test('二进制 payload 原样往返（CBOR 字节串，不转 base64）', async
 
 // ── 订阅 ──
 
-test('subscribe：元组两半、流、退订 id', async () => {
+test('subscribe：统一句柄、流、退订 id', async () => {
   const peer = await spawnPeer({ id: 'srv', server: [tcp(PORT.napp)] })
   const app = await startApp('cli')
   await app.app.connect('srv', tcp(PORT.napp))
 
-  const [sub, stream] = app.app.subscribe('srv', 'job:*')
-  const res = await sub
+  const { subId, response, stream } = app.app.subscribe('srv', 'job:*')
+  const res = await response
   assert.equal(res.meta.isOk, true)
-  const subId = res.payload.targetSubId
-  assert.equal(typeof subId, 'string')
+  assert.equal(res.payload.targetSubId, subId)
 
   await peer.emit('job:one', { n: 1 })
   await peer.emit('job:two', { n: 2 })
 
   const got = []
-  for await (const c of stream) { got.push(c.n); if (got.length === 2) break }
+  for await (const message of stream) { got.push(message.payload.n); if (got.length === 2) break }
   assert.deepEqual(got, [1, 2])
 
+  await app.stop(); await peer.stop()
+})
+
+test('subscribe stream 使用 queueMaxCount', async () => {
+  const peer = await spawnPeer({ id: 'srv', server: [tcp(PORT.napp)] })
+  const app = await startApp('cli', { opt: { queueMaxCount: 2 } })
+  await app.app.connect('srv', tcp(PORT.napp))
+
+  const { response, stream } = app.app.subscribe('srv', 'limit:*')
+  await response
+  for (let i = 0; i < 4; i++) await peer.emit(`limit:${i}`, { i })
+  await sleep(100)
+  assert.equal(stream.pending, 2)
+
+  const got = []
+  for await (const message of stream) { got.push(message.payload.i); if (got.length === 2) break }
+  assert.deepEqual(got, [2, 3])
   await app.stop(); await peer.stop()
 })
 
@@ -394,15 +424,15 @@ test('回调和流共存，同一条 notify 两边都到', async () => {
   await app.app.connect('srv', tcp(PORT.napp))
 
   const viaCb = []
-  const [sub, stream] = app.app.subscribe('srv', 'both:*', (payload, msg) => {
-    viaCb.push({ n: payload.n, hit: msg.meta.hitSubName })
+  const { response, stream } = app.app.subscribe('srv', 'both:*', (message) => {
+    viaCb.push({ n: message.payload.n, hit: message.meta.hitSubName })
   })
-  await sub
+  await response
   await peer.emit('both:hello', { n: 7 })
 
   const it = stream[Symbol.asyncIterator]()
   const first = await it.next()
-  assert.equal(first.value.n, 7, '流收到了')
+  assert.equal(first.value.payload.n, 7, '流收到了')
   assert.deepEqual(viaCb, [{ n: 7, hit: 'both:hello' }], '回调也收到了，且 hitSubName 是具体名')
   await it.return?.()
 
@@ -415,8 +445,8 @@ test('break 是主动退订：对端订阅表清零，回调也停', async () =>
   await app.app.connect('srv', tcp(PORT.napp))
 
   const viaCb = []
-  const [sub, stream] = app.app.subscribe('srv', 'brk:*', (p) => viaCb.push(p.n))
-  await sub
+  const { response, stream } = app.app.subscribe('srv', 'brk:*', (message) => viaCb.push(message.payload.n))
+  await response
   assert.equal((await peer.ask('subcount')).subs, 1, '对端记了一条')
 
   await peer.emit('brk:a', { n: 1 })
@@ -438,8 +468,8 @@ test('unsubscribe 手动退订', async () => {
   const app = await startApp('cli')
   await app.app.connect('srv', tcp(PORT.napp))
 
-  const [sub] = app.app.subscribe('srv', 'man:*', () => {})
-  const subId = (await sub).payload.targetSubId
+  const { subId, response } = app.app.subscribe('srv', 'man:*', () => {})
+  await response
   assert.equal((await peer.ask('subcount')).subs, 1)
 
   const res = await app.app.unsubscribe('srv', subId)
@@ -455,8 +485,8 @@ test('通配符订阅：hitSubName 区分具体事件', async () => {
   await app.app.connect('srv', tcp(PORT.napp))
 
   const hits = []
-  const [sub] = app.app.subscribe('srv', 'w:*', (_p, msg) => hits.push(msg.meta.hitSubName))
-  await sub
+  const { response } = app.app.subscribe('srv', 'w:*', (message) => hits.push(message.meta.hitSubName))
+  await response
   await peer.emit('w:alpha', {})
   await peer.emit('w:beta', {})
   await sleep(120)
@@ -470,12 +500,12 @@ test('对端断开并超过重连宽限后，流结束且 for await 自然退出
   const app = await startApp('cli', { opt: { reconnectGraceMs: 50 } })
   await app.app.connect('srv', tcp(PORT.napp))
 
-  const [sub, stream] = app.app.subscribe('srv', 'dead:*')
-  await sub
+  const { response, stream } = app.app.subscribe('srv', 'dead:*')
+  await response
   await peer.emit('dead:one', { n: 1 })
 
   const got = []
-  const loop = (async () => { for await (const c of stream) got.push(c.n) })()
+  const loop = (async () => { for await (const message of stream) got.push(message.payload.n) })()
   await sleep(100)
   peer.child.kill('SIGKILL')
 

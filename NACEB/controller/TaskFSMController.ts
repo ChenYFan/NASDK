@@ -21,10 +21,7 @@ import type { PipelineInstance } from '../instance/PipelineInstance.ts'
 // ============================================================
 // builtin privileged handlers
 // ============================================================
-// The three builtin handlers' execute is shaped like a user handler (`this` = TaskInstance, sole param = the
-// upstream PipelineInstance). NACEB capability (pushEvent/getEvent/consumeEvent) is captured via a **closure**
-// over ref — it can't live on the handler instance (this is bound to the TaskInstance, so the handler can't read
-// its own fields). This privilege belongs only to builtins.
+// execute shaped like a user handler (`this` = TaskInstance); NACEB capability captured via closure over ref.
 
 function makeTerminalHandler(): TaskHandler {
   return new class extends TaskHandler<unknown> {
@@ -82,22 +79,22 @@ export class TaskFSMController {
     this.naceb = naceb; this.ref = ref
   }
 
-  /** Look up a handler: internal builtins ($ task) first, then NACEB's public taskHandlers registry. */
+  /** Look up a handler: builtins ($ task) first, then the public taskHandlers registry. */
   _getHandler(name: string): TaskHandler | undefined {
     return this.builtins.get(name) ?? this.naceb.taskHandlers.get(name)
   }
 
-  /** All tasks of this event (at runtime usually 0-1, as a pipeline has a single current task). forceCleanEventUnderLayer uses it to list tasks to clean. */
+  /** All tasks of this event (usually 0-1 at runtime). */
   findTaskByEventId(eventId: string): TaskInstance[] {
     return [...this.byId.values()].filter(t => t.eventId === eventId)
   }
 
-  /** Assembly-only: register a builtin $ handler (bypasses the reserved-name check). */
+  /** Assembly-only: register a builtin $ handler. */
   registerBuiltin(h: TaskHandler) { this.builtins.set(h.name, h) }
 
   dispatch(pipeline: PipelineInstance, step: PipelineStep): TaskInstance {
     const h = this._getHandler(step.task); if (!h) throw new Error(`unknown task '${step.task}'`)
-    // Validate before constructing the task. PipelineInstance turns this throw into pipeline/event failure.
+    // Validate before constructing the task; PipelineInstance turns this throw into pipeline/event failure.
     if (h.payloadSchema) {
       const r = h.payloadSchema.safeParse(step.input)
       if (!r.success) throw nacebInternal('bad-task-input', `task '${step.task}' input rejected: ${r.error.message}`)
@@ -117,10 +114,8 @@ export class TaskFSMController {
   }
   private isLaneFree(k: string) { return !(this.blockedQueue.get(k) || []).some(t => t.status === 'running') }
 
-  /** ignite: promote a pending task to running, then _run. Error handling is built into TaskInstance._transition
-   *  (beforeTRunning is the task's only veto point: veto → stay pending, return false; hook bug → layer failure,
-   *  return false). Here we only read the bool: go running (true) → _run; otherwise don't (veto stays pending to
-   *  retry next beat / bug already failure). Either counts as an action this beat. */
+  /** ignite: promote a pending task to running, then _run. beforeTRunning is the only veto point
+   *  (veto → stay pending; hook bug → layer failure). */
   private async _ignite(t: TaskInstance): Promise<boolean> {
     if (await t._transition('running')) t._run()
     return true

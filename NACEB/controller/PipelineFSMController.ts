@@ -57,13 +57,12 @@ export class PipelineFSMController {
       if (t.status !== 'done' && t.status !== 'stopped' && t.status !== 'failure') continue
       if (t.status === 'done') {
         const result = t.consume(); p.currentTaskId = null
-        // TERMINAL done → pipeline done (consumed already; _transition's internal terminal guard shields a throwing hook). Non-TERMINAL → dispatch the next task.
         if (t.name === TERMINAL) await p._transition('done', [() => { p.result.final = result }])
         else await p._next(result)
       } else if (t.status === 'stopped') {
         await p._transition('paused')
       } else {
-        // task failure → pipeline failure (consumed): consume the task ({error}) + write final; _transition's internal guard shields a throwing hook.
+        // task failure → pipeline failure: consume the task ({error}) + write final.
         await p._transition('failure', [() => { p.result.final = t.consume(); p.currentTaskId = null }])
       }
       moved = true

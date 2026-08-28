@@ -23,11 +23,35 @@ async function terminateSilent(app) {
   await app.nact.terminate()
 }
 
+async function waitFor(promise, timeoutMs = 200) {
+  let timer
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`timed out after ${timeoutMs}ms`)), timeoutMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 test('ACK 信封只携带 parentId，不携带 payload', () => {
   const ack = buildMessage('receiver', 'ack', 'sender', { parentId: 'message-1' })
   assert.equal(ack.type, 'ack')
   assert.equal(ack.meta.parentId, 'message-1')
   assert.equal('payload' in ack, false)
+})
+
+test('公开 ack() 发送 ACK 且不等待对端 ACK', async () => {
+  const { app, sent } = await bound()
+  assert.equal(await app.nacp.ack('them', { parentId: 'message-1' }), true)
+  assert.equal(sent.length, 1)
+  assert.equal(sent[0].type, 'ack')
+  assert.equal(sent[0].meta.parentId, 'message-1')
+  assert.equal('payload' in sent[0], false)
+  await terminateSilent(app)
 })
 
 test('response 在对应 ACK 到达前保持 pending，到达后完成', async () => {
@@ -106,7 +130,7 @@ test('重连宽限到期后丢弃 backlog，并以 false 结束 ACK waiter', asy
   const { app } = await bound('me', { ackTimeoutMs: 15, reconnectGraceMs: 25 })
   const delivered = app.response('them', { parentId: 'request-1', isOk: true })
 
-  assert.equal(await delivered, false)
+  assert.equal(await waitFor(delivered), false)
   assert.deepEqual(app.listConnectedApp({ isOnlineOnly: false }), [])
   await app.terminate()
 })

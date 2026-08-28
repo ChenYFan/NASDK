@@ -81,16 +81,11 @@ export class TaskInstance {
   afterTPending(fn: HookFn<TaskInstance>) { return this.on('afterTPending', fn) }
 
   /**
-   * Transition primitive, the only beforeT-hook entry; error handling inlined (linear, no helper).
-   * Returns boolean: transitioned=true; veto-left / bug-failure=false (_ignite reads it to decide _run).
-   * Order: beforeT hook → funcs → status → afterT hook. If beforeT throws:
-   *   - only `to === 'running'` can veto (the sole task veto point; stays pending, retried next beat). done/
-   *     failure/stopped are already facts (execute returned/threw/aborted) — no terminal veto.
-   *   - any other throw (non-VetoT bug on running, any throw on a terminal state incl. VetoT) → hook bug:
-   *     emit error → if the original target was failure, delete beforeTFailure (break recursion) → recursive
-   *     _transition('failure') → false. Task-layer crashes have no live side effects (execute ended or never
-   *     ran), so only layer-failure, bubbled up by the tick's consume — never forceCleanEventUnderLayer (that's
-   *     event-only, for live child orphans).
+   * Transition primitive, the only beforeT-hook entry. Order: beforeT hook → funcs → status → afterT hook.
+   * If beforeT throws:
+   *   - only `to === 'running'` can veto (stays pending, retried next beat); terminal states are facts.
+   *   - any other throw → hook bug: emit error → delete beforeTFailure if target was failure (break
+   *     recursion) → recursive _transition('failure') → false.
    */
   async _transition(to: TaskStatus, funcs?: TransitionFunc[]): Promise<boolean> {
     const same = this.status === to
@@ -100,11 +95,11 @@ export class TaskInstance {
     try {
       await this.ctrl.ref.THookHandler('task', to, 'before', this.id, this, this.hooks.get(`beforeT${c}`))
     } catch (err) {
-      if (to === 'running' && err instanceof VetoT) {   // task 唯一可 veto 点 → 留 pending、return false
+      if (to === 'running' && err instanceof VetoT) {   // 唯一可 veto 点 → 留 pending
         this.ctrl.ref.emit('warning', this.id, { layer: 'task', id: this.id, msg: `beforeTRunning vetoed → stay pending: ${err.message}`, opt: { reason: 'beforeTRunning-vetoed', veto: err.message } })
         return false
       }
-      // hook bug (any throw while a terminal state is being entered) → layer-failure crash chain
+      // hook bug → layer-failure crash chain
       const msg = (err as any)?.message ?? String(err)
       this.ctrl.ref.emit('error', this.id, { layer: 'task', id: this.id, msg: `beforeT${c} hook threw (not vetoable here) → task failure: ${msg}`, opt: { at: `beforeT${c}`, error: msg } })
       if (to === 'failure') this.hooks.delete('beforeTFailure')
@@ -123,7 +118,7 @@ export class TaskInstance {
       .then(() => handler.execute.call(this))
       .then(async (result) => {
         if (this.abort.signal.aborted) await this._transition('stopped')
-        // writing response is the done-transition side-effect → inside _transition (after beforeTDone hook)
+        // response written as the done-transition side-effect (after beforeTDone hook).
         else await this._transition('done', [() => { this.response = new TaskResponse(result) }])
       })
       .catch(async (err) => {
@@ -149,11 +144,9 @@ export class TaskInstance {
     if (this.status === 'pending') { await this._transition('stopped'); this.ctrl.ref.alertTick('task'); return }
     if (this.status === 'running') {
       await this.onSignal({ kind: 'abort' })
-      // Wait up to ctrl.stopTimeoutMs for the execute promise to settle; on timeout, stop waiting (the execute
-      // promise lives or dies in the background) and emit.
+      // Wait up to ctrl.stopTimeoutMs for the execute promise to settle; on timeout, stop waiting.
       if (this._donePromise) {
-        // ⚠️ must clearTimeout: Promise.race only ignores the loser, it doesn't cancel it. When the task responds
-        // to abort normally, this stopTimeoutMs (120s) timer would otherwise pin the event loop for two minutes.
+        // ⚠️ must clearTimeout: Promise.race only ignores the loser, it doesn't cancel it.
         let timer: ReturnType<typeof setTimeout> | undefined
         const timeout = new Promise<'timeout'>(res => { timer = setTimeout(() => res('timeout'), this.ctrl.stopTimeoutMs) })
         try {
@@ -169,7 +162,7 @@ export class TaskInstance {
   }
   async _restart(): Promise<void> {
     if (this.status !== 'stopped') throw new Error(`Task ${this.id} in status ${this.status} cannot restart (must be stopped)`)
-    // resetting abort/response/error is the pending-transition side-effect (runs after beforeTPending veto passes)
+    // resetting abort/response/error is the pending-transition side-effect.
     await this._transition('pending', [() => {
       this.abort = new AbortController()
       this.response = undefined; this.error = undefined

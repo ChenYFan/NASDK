@@ -6,7 +6,7 @@
  * 服务端在 ./_server.mjs，由 fork 起在独立进程里 —— 两个 App 本来就该分处两个进程，同进程扮演两端会让
  * 测试写出真实部署下不可能的操作（直接 emit 到对端的 bus）。
  *
- *   node --experimental-strip-types --test test/simple/napp.test.mjs
+ *   node --import tsx --test test/simple/napp.test.mjs
  */
 
 import { test } from 'node:test'
@@ -22,7 +22,6 @@ const PORT = 18900
 /** 起服务端子进程，等它 ready。返回子进程句柄 + 一个 ask()（请它做事并等回话）。 */
 async function startServer(specs) {
   const child = fork(SERVER, [JSON.stringify(specs)], {
-    execArgv: ['--experimental-strip-types'],
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   })
   await new Promise((resolve, reject) => {
@@ -65,7 +64,7 @@ test('simple/napp：一次完整往返', async (t) => {
     const seen = []
     const res = await client.request('core', {
       kind: 'event', target: 'countdown', payload: { from: 3 },
-      onProcess: (chunk) => seen.push(chunk.at),
+      onProcess: (message) => seen.push(message.payload.at),
     }).response
     assert.deepEqual(seen, [3, 2, 1])
     assert.deepEqual(res.payload, { reached: 0 })
@@ -79,17 +78,17 @@ test('simple/napp：一次完整往返', async (t) => {
   })
 
   await t.test('subscribe：远程订阅对端的 bus', async () => {
-    const [sub, stream] = client.subscribe('core', 'demo:*')
-    const res = await sub                      // 等对端确认订阅已建立
+    const { subId, response, stream } = client.subscribe('core', 'demo:*')
+    const res = await response                 // 等对端确认订阅已建立
     assert.equal(res.meta.isOk, true)
-    assert.equal(typeof res.payload.targetSubId, 'string')   // 退订要的 id 在这
+    assert.equal(res.payload.targetSubId, subId)
 
     server.emit('demo:hello', { n: 1 })        // 请对端自己发
     server.emit('demo:world', { n: 2 })
 
     const got = []
-    for await (const chunk of stream) {
-      got.push(chunk.n)
+    for await (const message of stream) {
+      got.push(message.payload.n)
       if (got.length === 2) break              // break == 主动退订
     }
     assert.deepEqual(got, [1, 2])

@@ -1,9 +1,6 @@
 /**
- * NACAB public API barrel.
- *
- * Exposes the assembly (NACAB), the authoring base (AbilityHandler), the runtime record
- * (AbilityInstance), the public declaration type (Ability), the observation bus type
- * (ReadonlyBus), and the layer error (NACABError). Mirrors NACEB's barrel shape.
+ * NACAB public API barrel: the assembly, the authoring base, the runtime record, the declaration type,
+ * the observation bus type, and the layer error.
  */
 
 export { NACAB } from './NACAB.ts'

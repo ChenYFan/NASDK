@@ -76,15 +76,10 @@ export class PipelineInstance {
   afterTPending(fn: HookFn<PipelineInstance>) { return this.on('afterTPending', fn) }
 
   /**
-   * Transition primitive, the only beforeT-hook entry; error handling inlined. Returns boolean: transitioned=true;
-   * crashed-to-failure=false. Log always fires (incl. same-state: running→running dispatching a new task is a real
-   * move); only the status assignment is skipped when same. **The pipeline has NO veto point**: done/failure/paused
-   * are forced by the lower task's terminal state (already fact); running (dispatching the next task) is automatic
-   * flow driven by handler.next() and must not be blocked (a veto would replay next() / break running→running).
-   * So any beforeT throw (incl. VetoT) is a hook bug: emit error → if the original target was failure delete
-   * beforeTFailure (break recursion) → recursive _transition('failure') → false. A pipeline crash has no live task
-   * (not yet dispatched / already consumed / terminal), so only layer-failure, bubbled to the event by the tick's
-   * consume — never forceCleanEventUnderLayer.
+   * Transition primitive, the only beforeT-hook entry. Log always fires (incl. same-state); the status
+   * assignment is skipped when same. The pipeline has NO veto point — done/failure/paused are forced by the
+   * lower task's terminal state, running is automatic flow. Any beforeT throw (incl. VetoT) is a hook bug:
+   * emit error → delete beforeTFailure if target was failure → recursive _transition('failure') → false.
    */
   async _transition(to: PipelineStatus, funcs?: TransitionFunc[]): Promise<boolean> {
     const same = this.status === to
@@ -94,7 +89,7 @@ export class PipelineInstance {
     try {
       await this.ctrl.ref.THookHandler('pipeline', to, 'before', this.id, this, this.hooks.get(`beforeT${c}`))
     } catch (err) {
-      // pipeline has no veto point → any throw (incl. VetoT) is a hook bug: layer-failure crash chain
+      // No veto point → any throw is a hook bug: layer-failure crash chain.
       const msg = (err as any)?.message ?? String(err)
       this.ctrl.ref.emit('error', this.id, { layer: 'pipeline', id: this.id, msg: `beforeT${c} hook threw (pipeline 无 veto 点) → pipeline failure: ${msg}`, opt: { eventId: this.event.id, at: `beforeT${c}`, error: msg } })
       if (to === 'failure') this.hooks.delete('beforeTFailure')
@@ -110,39 +105,29 @@ export class PipelineInstance {
 
   async _dispatch(step: PipelineStep | undefined) {
     if (!step) { await this._transition('failure', [() => { this.result.final = { error: 'pipeline returned nothing' } }]); return }
-    // Dispatching a task happens inside the transition (after the beforeTRunning hook, before the status change).
-    // "Dispatch the next task" is handler.next()'s automatic flow, not a down-transition point users should block
-    // → beforeTRunning does not support veto: any throw (incl. VetoT) bubbles to _next's catch as an ordinary
-    // failure (replaying next() would corrupt, and running→running isn't a valid veto target; to gate a step, veto
-    // at the task layer's beforeTRunning — there the task is newly built and staying pending is naturally retryable).
+    // Dispatch happens inside the transition; beforeTRunning does not support veto — to gate a step, veto at
+    // the task layer's beforeTRunning (staying pending is naturally retryable there).
     await this._transition('running', [() => {
       const t = this.ctrl.ref.taskController.dispatch(this, step)
       this.currentTaskId = t.id
     }])
   }
   async _next(lastResult: unknown) {
-    // A pipeline crash leaves no live task below (not dispatched / already consumed / terminal), so any throw
-    // (handler.next() business error, dispatch of an unknown task, a beforeTRunning hook bug, even VetoT) is an
-    // ordinary failure: this layer goes failure, the failure result is then consumed by the event and bubbles up;
-    // the layer mechanism syncs its own state. No forceCleanEventUnderLayer (that's only for the event layer's
-    // live-orphan tasks).
+    // Any throw here is an ordinary failure: this layer goes failure, bubbled up by the event's consume.
     await this.exclusive(async () => {
       try { await this._dispatch(this.handler.next.call(this, lastResult)) }
       catch (err: any) { await this._transition('failure', [() => { this.result.final = { error: err?.message ?? String(err) } }]) }
     })
   }
 
-  /** Middle of the pause chain. Returns boolean: whole segment ok=true; this layer didn't reach paused (hook bug →
-   *  failure)=false. On false, do NOT touch the lower task — the upper Event.pause reads this bool to roll back,
-   *  avoiding the "Event paused but pipeline failed" cross-layer skew (which would make pause() lie about success). */
+  /** Middle of the pause chain; false = this layer didn't reach paused → upper Event.pause rolls back. */
   async _pause(): Promise<boolean> {
     const t = this.getTask()
     if (!(await this._transition('paused'))) return false
     if (t) await t._stop()
     return true
   }
-  /** Middle of the resume chain. Returns boolean: whole segment ok=true; this layer didn't reach running=false.
-   *  task._restart runs first (it asserts it was stopped, throwing otherwise), then this layer goes running. */
+  /** Middle of the resume chain; task._restart runs first, then this layer goes running. */
   async _resume(): Promise<boolean> {
     const t = this.getTask()
     if (t) await t._restart()

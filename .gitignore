@@ -1,4 +1,6 @@
-dist/
-node_modules/
+**/dist/
+**/node_modules/
+docs/.vitepress/cache/
+docs/.vitepress/dist/
 .DS_Store
 *.tsbuildinfo

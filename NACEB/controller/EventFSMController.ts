@@ -45,11 +45,8 @@ export class EventFSMController {
     return final
   }
 
-  /** Clock liveness: keep running while any event still needs attention —
-   *  idle / paused are tick-exempt (waiting for external start() / resume(); nextTick always skips them), so they
-   *  do NOT hold the clock: a queue of only idle/paused stops it, and start()/resume() re-arm it via ensureClock.
-   *  Non-terminal = live; terminal but !bypassConsume is also live (waiting for external consume).
-   *  Terminal + bypassConsume is not live (discard-on-terminal; perTick auto-consumes). */
+  /** Clock liveness: idle/paused are tick-exempt (external start()/resume() re-arms via ensureClock);
+   *  non-terminal = live; terminal + !bypassConsume = live (waiting for external consume). */
   hasLive(): boolean {
     return this.queue.some(e => {
       if (e.status === 'idle' || e.status === 'paused') return false
@@ -58,16 +55,11 @@ export class EventFSMController {
     })
   }
 
-  /** nextTick — only the event controller returns after a single action. Order 1→4, ignoring idle/paused.
-   *  Error handling is entirely inside EventInstance._transition (veto→stay, bug→forceCleanEventUnderLayer +
-   *  failure), so the call sites are clean: `await e._transition(...)` then return true (this beat had an action;
-   *  self re-fire / next-beat retry). Nothing here needs a fallback: pause/resume are all-or-nothing (roll back on
-   *  lower-layer failure), so "event paused but pipeline terminal" never exists for the tick to repair. done/failure
-   *  are reclaimed only in step 4 (bypassConsume). */
+  /** One action per tick (rate limit), in order 1→4, ignoring idle/paused. Error handling lives inside
+   *  EventInstance._transition; done/failure reclaimed only in step 4 (bypassConsume). */
   async nextTick(): Promise<boolean> {
     const P = this.ref.pipelineController()
-    // 1 processing/pending/activating: sync pipeline state to the event (terminal → take terminal; no task → skip;
-    //   else align to the task kind).
+    // 1 processing/pending/activating: sync pipeline state to the event.
     for (const e of this.queue) {
       if (e.status !== 'processing' && e.status !== 'pending' && e.status !== 'activating') continue
       const ps = P.getStatus(e.id)
@@ -76,9 +68,7 @@ export class EventFSMController {
       const want: EventStatus | null = kind === 'blocked' ? 'processing' : kind === 'async' ? 'pending' : null
       if (want && want !== e.status) { await e._transition(want); return true }
     }
-    // 2 queue: same-scope unoccupied → activating; the pipeline is built inside the transition func (beforeTActivating
-    //   veto → nothing built, event stays queue; hook bug → crash chain to failure inside _transition). Either counts as
-    //   one action → return true.
+    // 2 queue: same-scope unoccupied → activating (pipeline built inside the transition func).
     for (const e of this.queue) {
       if (e.status !== 'queue') continue
       if (this.isScopeBusy(e.scope, e.id)) continue
@@ -93,21 +83,18 @@ export class EventFSMController {
       await e._transition('queue')
       return true
     }
-    // 4 reclaim: terminal (done/failure) + bypassConsume events auto-consume directly (does not spend the single-action budget, clears all in one pass).
-    //   afterTDone/afterTFailure already ran in step 1's _transition (wait4 already got the child result), so clearing here is safe.
+    // 4 reclaim: terminal + bypassConsume auto-consume (no single-action budget spent).
     for (const e of [...this.queue])
       if ((e.status === 'done' || e.status === 'failure') && e.bypassConsume) this.consume(e.id)
     return false
   }
 
-  /** Terminal collapse (→ done/failure): consuming the lower pipeline (take final + destroy) is a transition
-   *  side-effect, placed in _transition's func (after beforeT{Done|Failure}, before the status change). Errors live
-   *  in _transition: veto → stay, pipeline unconsumed, retried next beat; hook bug → crash chain (forceCleanEventUnderLayer
-   *  + failure). This beat counts as an action either way. */
+  /** Terminal collapse: consuming the lower pipeline is a transition side-effect (after beforeT{Done|Failure},
+   *  before the status change). */
   private async _terminate(e: EventInstance, ps: 'done' | 'failure', P: PipelineFSMController): Promise<void> {
     await e._transition(ps, [() => {
       const p = P.getByEventId(e.id)
-      e.final = p ? p.consume() : undefined   // take final + destroy pipeline; lands on e.final for external consumeEvent
+      e.final = p ? p.consume() : undefined
     }])
   }
 
