@@ -85,4 +85,4 @@ app.bus.listen("task:*", (payload, hitKey) => {
 
 `task:*` 可以匹配 `task:done`，但不能匹配 `task:step:done`。EventBus 不支持 `**` 多段通配符。
 
-完整方法见 [EventBus API](./eventbus/bus)。各事件字段分别见 [NApp 可观测](./advanced/observability)、[NACP 可观测](/transport/nacp/observability) 和 [NACT 事件](/transport/nact/events)。
+完整方法见 [EventBus API](./eventbus/bus)。各事件字段分别见 [NApp 可观测](./advanced/observability)、[NACP 可观测](/transport/nacp/observability) 和 [NACT 可观测](/transport/nact/observability)。

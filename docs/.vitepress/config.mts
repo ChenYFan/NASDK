@@ -58,6 +58,7 @@ export default defineConfig({
                       link: "/napp/abilities/unsubscribe",
                     },
                     { text: "notify", link: "/napp/abilities/notify" },
+                    { text: "signal", link: "/napp/abilities/signal" },
                   ],
                 },
                 {
@@ -95,21 +96,14 @@ export default defineConfig({
         {
           text: "NACP",
           items: [
+            { text: "NACPMessage", link: "/transport/nacp/message" },
             {
-              text: "出站族函数",
+              text: "出站",
               link: "/transport/nacp/outbound",
               items: [
-                {
-                  text: "request",
-                  link: "/transport/nacp/outbound/request",
-                  items: [
-                    {
-                      text: "AutoSubscribe",
-                      link: "/transport/nacp/outbound/request/auto-subscribe",
-                    },
-                  ],
-                },
+                { text: "request", link: "/transport/nacp/outbound/request" },
                 { text: "response", link: "/transport/nacp/outbound/response" },
+                { text: "signal", link: "/transport/nacp/outbound/signal" },
                 {
                   text: "subscribe",
                   link: "/transport/nacp/outbound/subscribe",
@@ -127,8 +121,9 @@ export default defineConfig({
                 { text: "ack", link: "/transport/nacp/outbound/ack" },
               ],
             },
+
             {
-              text: "入站族函数",
+              text: "入站",
               link: "/transport/nacp/inbound",
               items: [
                 {
@@ -138,6 +133,10 @@ export default defineConfig({
                 {
                   text: "onResponse",
                   link: "/transport/nacp/inbound/on-response",
+                },
+                {
+                  text: "onSignal",
+                  link: "/transport/nacp/inbound/on-signal",
                 },
                 {
                   text: "onSubscribe",
@@ -159,21 +158,33 @@ export default defineConfig({
                 { text: "onAck", link: "/transport/nacp/inbound/on-ack" },
               ],
             },
-            { text: "生命周期", link: "/transport/nacp/lifecycle" },
             {
-              text: "可观测",
-              link: "/transport/nacp/observability",
+              text: "进阶",
+              items: [
+                {
+                  text: "AutoSubscribe",
+                  link: "/transport/nacp/auto-subscribe",
+                },
+                { text: "生命周期", link: "/transport/nacp/lifecycle" },
+                { text: "可观测", link: "/transport/nacp/observability" },
+                { text: "内部记录表", link: "/transport/nacp/tables" },
+              ],
             },
           ],
         },
         {
           text: "NACT",
           items: [
-            { text: "入站与出站", link: "/transport/nact/inbound-outbound" },
-            { text: "NACT framing", link: "/transport/nact/framing" },
+            { text: "NACT Framing", link: "/transport/nact/framing" },
             { text: "底层传输", link: "/transport/nact/transport" },
-            { text: "生命周期", link: "/transport/nact/lifecycle" },
-            { text: "可观测", link: "/transport/nact/events" },
+            { text: "入站与出站", link: "/transport/nact/inbound-outbound" },
+            {
+              text: "进阶",
+              items: [
+                { text: "生命周期", link: "/transport/nact/lifecycle" },
+                { text: "可观测", link: "/transport/nact/observability" },
+              ],
+            },
           ],
         },
       ],
