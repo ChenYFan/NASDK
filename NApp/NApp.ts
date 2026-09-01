@@ -176,22 +176,25 @@ export class NApp {
     if (this.stopping) {
       return { reqId: '', response: Promise.reject(nappOutbound('stopping', 'NApp is stopping')) }
     }
-    if (opt.kind === 'ability') return this.nacp.request(to, opt)
-
     let reqId = ''
+    if (opt.kind === 'ability') {
+      const response = this.nacp.request(to, { ...opt, onReqId: (id) => { reqId = id } })
+      return { reqId, response }
+    }
+
     const stream = new NotifyStream<NotifyMessage>({
       max: this.queueMaxCount,
       onOverflow: (dropped: unknown) => this.bus.emit(NAppInternal.notifyWarning, {
         appId: to, subId: reqId, targetSubName: `nacp:event:${reqId}:process`, dropped, reason: 'stream-overflow',
       }),
     })
-    const call = this.nacp.request(to, {
+    const response = this.nacp.request(to, {
       ...opt,
       onProcess: (_chunk, message) => { opt.onProcess?.(message); stream.push(message) },
       onProcessEnd: () => stream.end(),
+      onReqId: (id) => { reqId = id },
     })
-    reqId = call.reqId
-    return { ...call, stream }
+    return { reqId, response, stream }
   }
 
   /** Send a reliable one-way Signal to an active Event request. Resolves when the Signal itself is ACKed. */

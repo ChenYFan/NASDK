@@ -254,16 +254,18 @@ export class NACP {
     opt: {
       kind: RequestKind; target?: string; payload?: any
       onProcess?: (chunk: any, msg: NotifyMessage) => void; onProcessEnd?: () => void
+      onReqId?: (reqId: string) => void
     },
-  ): { reqId: string; response: Promise<ResponseMessage> } {
+  ): Promise<ResponseMessage> {
     const msg = this.build('request', to, { kind: opt.kind, target: opt.target, payload: opt.payload }) as RequestMessage
+    opt.onReqId?.(msg.id)
     // event ONLY: ability produces no process stream. Gated on kind ALONE (all the responder can see).
     if (opt.kind === 'event') {
       this.subscribe(to, callProcessName(opt.kind, msg.id), opt.onProcess, {
         subId: msg.id, autoSub: true, onEnd: opt.onProcessEnd,
       })
     }
-    return { reqId: msg.id, response: this.Send4Response(msg, to) }
+    return this.Send4Response(msg, to)
   }
 
   /** One-way process chunk; the only type with no ack (cheapest to drop on overflow). Resolves on DEPARTURE. */
@@ -511,7 +513,7 @@ export class NACP {
     //
     // register is the exception, and only because of ordering: there is no appId binding yet, so an ack here
     // would have no route. `onRegister` sends it down the inbound peer once the handshake passes.
-    if (msg.type !== 'register') void this.ack(msg.from, { parentId: msg.id })
+    if (msg.type !== 'register' && expectsAck(msg.type)) void this.ack(msg.from, { parentId: msg.id })
 
     // Layer 2 — a replay of something already handled: our earlier ack was lost, or the link dropped before
     // the sender saw it. Stopping here keeps handling exactly-once.

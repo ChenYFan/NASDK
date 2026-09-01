@@ -1,4 +1,13 @@
 {
+  "semi": true,
   "embeddedLanguageFormatting": "off",
-  "proseWrap": "preserve"
+  "proseWrap": "preserve",
+  "overrides": [
+    {
+      "files": ["*.md", "*.mdx"],
+      "options": {
+        "semi": false
+      }
+    }
+  ]
 }

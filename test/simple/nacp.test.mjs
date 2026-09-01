@@ -68,7 +68,6 @@ test('request 的 meta 带 kind 和 target', async () => {
   // request 的 promise 要等一条真 response 才 settle；假 Peer 不答 request，所以 terminate 会让它 reject。
   // 必须接住，否则测试结束后冒出 unhandledRejection。
   const pending = app.nacp.request('them', { kind: 'ability', target: 'math.add', payload: { a: 1 } })
-    .response
     .catch(() => { /* terminate 时失败，预期行为 */ })
 
   const m = sent.find(x => x.type === 'request')

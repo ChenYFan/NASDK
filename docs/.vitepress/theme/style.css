@@ -112,13 +112,14 @@
   height: 44px;
   border-radius: 8px !important;
   padding: 0 20px !important;
+  padding-top: 2px !important;
 }
 
 .VPHero .VPButton.brand {
   border-color: #2a3dfb !important;
   background: #2a3dfb !important;
   color: #fff !important;
-  padding-top: 2px;
+
 }
 
 .VPHero .VPButton.alt {
@@ -165,13 +166,6 @@
 
 .dark .VPHero .image-container:hover .VPImage {
   filter: drop-shadow(-10px 30px 34px rgb(0 0 0 / 58%));
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .VPHero .image-bg,
-  .VPHero .VPImage {
-    transition: none;
-  }
 }
 
 .VPFeatures {

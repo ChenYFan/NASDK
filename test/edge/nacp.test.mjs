@@ -51,7 +51,7 @@ test('5000 条 pending 挂着时断连：宽限期后全部 reject，表清空',
 
   // fakePeer 不答 request（只答四种握手），所以这些会一直挂着
   const pendings = Array.from({ length: N }, (_, i) =>
-    app.nacp.request('them', { kind: 'ability', target: 't', payload: { i } }).response.catch(e => e))
+    app.nacp.request('them', { kind: 'ability', target: 't', payload: { i } }).catch(e => e))
   await sleep(50)
   assert.equal(app.nacp.getPendingCount(), N, `${N} 条挂在表里`)
 
@@ -72,7 +72,7 @@ test('5000 条 pending 挂着时断连：宽限期后全部 reject，表清空',
 test('terminate 时挂着的 pending 全部 reject 为 terminate', async () => {
   const { app, peer } = await bound('cli-term')
   const pendings = Array.from({ length: 500 }, () =>
-    app.nacp.request('them', { kind: 'ability', target: 't', payload: {} }).response.catch(e => e))
+    app.nacp.request('them', { kind: 'ability', target: 't', payload: {} }).catch(e => e))
   await sleep(30)
 
   app.nacp.terminate()
@@ -86,7 +86,7 @@ test('terminate 时挂着的 pending 全部 reject 为 terminate', async () => {
 test('request 到没有路由的 appId：立刻 reject not-sent，不进 pending 表', async () => {
   // REQUEST_TIMEOUT_MS = -1（业务调用不设超时），所以没有这条检查就会永远挂着。
   const app = await startBare('lonely')
-  const [err, ms] = await timed(() => app.nacp.request('压根不存在', { kind: 'ability', target: 't' }).response.catch(e => e))
+  const [err, ms] = await timed(() => app.nacp.request('压根不存在', { kind: 'ability', target: 't' }).catch(e => e))
   assert.ok(err instanceof NACPError)
   assert.equal(err.code, 'not-sent')
   assert.equal(err.phase, 'outbound')
@@ -98,7 +98,7 @@ test('request 到没有路由的 appId：立刻 reject not-sent，不进 pending
 test('1000 条 not-sent 连续失败，pending 表始终为 0', async () => {
   const app = await startBare('lonely2')
   const errs = await Promise.all(Array.from({ length: 1000 }, () =>
-    app.nacp.request('nowhere', { kind: 'ability', target: 't' }).response.catch(e => e.code)))
+    app.nacp.request('nowhere', { kind: 'ability', target: 't' }).catch(e => e.code)))
   assert.ok(errs.every(c => c === 'not-sent'))
   assert.equal(app.nacp.getPendingCount(), 0, '一条也没漏进表')
   await app.terminate().catch(() => {})
@@ -374,7 +374,7 @@ test('request 永不超时 —— REQUEST_TIMEOUT_MS = -1 是刻意的', async (
   await sleep(10)
 
   const race = await Promise.race([
-    app.nacp.request('them', { kind: 'ability', target: 't' }).response.catch(e => `REJECTED:${e.code}`),
+    app.nacp.request('them', { kind: 'ability', target: 't' }).catch(e => `REJECTED:${e.code}`),
     sleep(300).then(() => 'STILL-WAITING'),
   ])
   assert.equal(race, 'STILL-WAITING', 'request 不设超时，挂着就是挂着')
