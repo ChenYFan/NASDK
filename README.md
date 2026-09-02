@@ -6,8 +6,9 @@
   <a href="https://github.com/ChenYFan/NASDK/actions/workflows/test.yml">
     <img src="https://github.com/ChenYFan/NASDK/actions/workflows/test.yml/badge.svg" alt="Test" />
   </a>
+  |
   <a href="https://nasdk.eurekac.cn">
-    <img src="https://img.shields.io/badge/document-%E5%AE%98%E6%96%B9%E6%96%87%E6%A1%A3-brightgreen" alt="Test" />
+    <img src="https://img.shields.io/badge/document-%E5%AE%98%E6%96%B9%E6%96%87%E6%A1%A3-brightgreen" alt="Document" />
   </a>
   </span>
 

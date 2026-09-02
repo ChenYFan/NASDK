@@ -5,6 +5,20 @@
   --vp-c-brand-soft: rgb(42 61 251 / 16%);
 }
 
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: smooth !important;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 200ms !important;
+    animation-duration: 1s !important;
+    animation-play-state: running !important;
+  }
+}
+
 .VPNavBar:not(.has-sidebar) .container,
 .VPHero .container,
 .VPFeatures .container {

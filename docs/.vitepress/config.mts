@@ -32,7 +32,7 @@ export default defineConfig({
       { text: "NApp", link: "/napp/what-is-nasdk" },
       { text: "传输与协议", link: "/transport/" },
       { text: "任务与流水线", link: "/workflow/" },
-      { text: "设计准则与 API", link: "/design/principles" },
+      { text: "设计准则", link: "/design/principles" },
     ],
     sidebar: {
       "/napp/": [
@@ -192,6 +192,7 @@ export default defineConfig({
         {
           text: "任务与流水线",
           items: [
+            { text: "任务处理概览", link: "/workflow/" },
             { text: "什么是NACEB", link: "/workflow/naceb" },
             { text: "什么是NACAB", link: "/workflow/nacab" },
 
@@ -202,46 +203,81 @@ export default defineConfig({
           text: "NACEB",
           items: [
             { text: "构造一个 NACEB", link: "/workflow/naceb/construction" },
+            { text: "NACEB API", link: "/workflow/naceb/api" },
             { text: "生命周期", link: "/workflow/naceb/lifecycle" },
             {
-              text: "Handler 与事件别名",
+              text: "注册 Handler 与别名",
               items: [
-                { text: "EventAlias", link: "/workflow/naceb/event-alias" },
-                { text: "Event", link: "/workflow/naceb/event" },
-                { text: "Pipeline", link: "/workflow/naceb/pipeline" },
-                { text: "Task", link: "/workflow/naceb/task" },
-              ],
-            },
-
-            {
-              text: "内建任务与子事件",
-              items: [
-                { text: "$terminal", link: "/workflow/naceb/terminal" },
                 {
-                  text: "$fire4SubEvent",
-                  link: "/workflow/naceb/fire4subevent",
+                  text: "TaskHandler",
+                  link: "/workflow/naceb/registration/task-handler",
                 },
                 {
-                  text: "$wait4SubEvent",
-                  link: "/workflow/naceb/wait4subevent",
+                  text: "PipelineHandler",
+                  link: "/workflow/naceb/registration/pipeline-handler",
+                },
+                {
+                  text: "EventAlias",
+                  link: "/workflow/naceb/registration/event-alias",
                 },
               ],
             },
-            { text: "刻", link: "/workflow/naceb/tick" },
             {
-              text: "可观测",
+              text: "NACEB 事件处理",
+              items: [
+                { text: "Event", link: "/workflow/naceb/processing/event" },
+                {
+                  text: "Pipeline",
+                  link: "/workflow/naceb/processing/pipeline",
+                },
+                { text: "Task", link: "/workflow/naceb/processing/task" },
+              ],
+            },
+            {
+              text: "进阶",
               items: [
                 {
-                  text: "Hook",
-                  link: "/workflow/naceb/observability/hook",
+                  text: "内建 Task",
+                  link: "/workflow/naceb/builtins/",
                   items: [
                     {
-                      text: "Veto机制",
-                      link: "/workflow/naceb/observability/hook/veto",
+                      text: "$terminal",
+                      link: "/workflow/naceb/builtins/terminal",
+                    },
+                    {
+                      text: "$fire4SubEvent",
+                      link: "/workflow/naceb/builtins/fire4subevent",
+                    },
+                    {
+                      text: "$wait4SubEvent",
+                      link: "/workflow/naceb/builtins/wait4subevent",
                     },
                   ],
                 },
-                { text: "Event", link: "/workflow/naceb/observability/event" },
+                {
+                  text: "SubEvent",
+                  link: "/workflow/naceb/advanced/subevent",
+                },
+                { text: "刻", link: "/workflow/naceb/advanced/tick" },
+                {
+                  text: "可观测",
+                  items: [
+                    {
+                      text: "Hook",
+                      link: "/workflow/naceb/advanced/observability/hook",
+                      items: [
+                        {
+                          text: "Veto机制",
+                          link: "/workflow/naceb/advanced/observability/hook/veto",
+                        },
+                      ],
+                    },
+                    {
+                      text: "Event",
+                      link: "/workflow/naceb/advanced/observability/event",
+                    },
+                  ],
+                },
               ],
             },
           ],
@@ -249,8 +285,9 @@ export default defineConfig({
         {
           text: "NACAB",
           items: [
-            { text: "构造一个 NACAB", link: "/workflow/nacab/construction" },
-            { text: "生命周期", link: "/workflow/nacab/lifecycle" },
+            { text: "NACAB", link: "/workflow/nacab" },
+            { text: "注册 Ability", link: "/workflow/nacab/registration" },
+            { text: "调用与观测", link: "/workflow/nacab/invocation" },
           ],
         },
         {
@@ -270,13 +307,7 @@ export default defineConfig({
       "/design/": [
         {
           text: "设计准则",
-          items: [
-            { text: "总体设计原理", link: "/design/principles" },
-            { text: "Q&A", link: "/design/qa" },
-            { text: "模块边界与职责", link: "/design/boundaries" },
-            { text: "可靠性和资源约束", link: "/design/reliability" },
-            { text: "各模块类型与函数参考", link: "/design/reference" },
-          ],
+          items: [{ text: "设计准则", link: "/design/principles" }],
         },
       ],
     },
