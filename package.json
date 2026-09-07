@@ -1,7 +1,7 @@
 {
   "name": "@chenyfan/nasdk",
   "version": "1.0.3",
-  "description": "Nyirusu Application SDK,a general-purpose transport and dispatch framework",
+  "description": "Nyirusu Application SDK, a general-purpose transport and dispatch framework",
   "author": "CyanFalse",
   "license": "MIT",
   "type": "module",
