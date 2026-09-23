@@ -10,8 +10,8 @@ NACT 本身不包含任何物理传输实现，所有物理连接都通过 Trans
 
 ```mermaid
 flowchart TD
-    S[Server Provider<br/>监听并接受连接] -->|Peer| T[NACT]
-    C[Client Provider<br/>主动发起连接] -->|Peer| T
+    S[Server Provider<br/>监听并接受连接] -->|Channel| T[NACT]
+    C[Client Provider<br/>主动发起连接] -->|Channel| T
     T <--> P[NACP]
 ```
 
@@ -26,6 +26,8 @@ flowchart TD
 | `@chenyfan/nact-unix-server` | Server | 建立 Unix Socket Server | Node.js/POSIX |
 | `@chenyfan/nact-unix-client` | Client | 主动连接 Unix Socket Server | Node.js/POSIX |
 | `@chenyfan/nact-streamable-http-server` | Server | 建立 HTTP Server 并通过HTTPStream和POST流式下载和上传消息 | Node.js 或其他允许监听的运行时 |
+| `@chenyfan/nact-nextjs` | Server | 挂载 Next.js App Router Route Handler | 常驻服务，Node.js runtime |
+| `@chenyfan/nact-nuxt` | Server | 挂载 Nuxt/Nitro API route | Nuxt 3/4、Nitro 2、H3 1 |
 | `@chenyfan/nact-streamable-http-client` | Client | 使用fetch Stream和POST | Web、Node.js、Worker、etc. |
 
 :::info
@@ -41,7 +43,7 @@ Server 与 Client 包在建立后两端均为完整的双向通道，C/S只表�
 Server 端只需安装 Server 包，并在 `start()` 前注册：
 
 ```bash
-npm install @chenyfan/nasdk @chenyfan/nact-websocket-server
+bun add @chenyfan/nasdk @chenyfan/nact-websocket-server
 ```
 
 ```ts
@@ -69,7 +71,7 @@ await app.start()
 Client 端只需安装 Client 包：
 
 ```bash
-npm install @chenyfan/nasdk @chenyfan/nact-websocket-client
+bun add @chenyfan/nasdk @chenyfan/nact-websocket-client
 ```
 
 ```ts
@@ -99,6 +101,8 @@ app.nact.use(new WebSocketClientProvider())
 
 没有注册对应传输时，`start()` 或 `connect()` 会宣告 `provider-not-found` 失败。
 :::
+
+WebSocket Server/Client 的 `provider.maxBufferedBytes` 默认 128 MiB，用于限制发送排队字节和未消费的接收字节。超限或收到文本帧会使连接失败；此通道只承载二进制 NACT 数据。TCP 的 `provider.keepAlive` 可以设为间隔毫秒数或 `false`，默认 30000；Unix Socket 不设置 TCP keepalive。
 
 
 :::details
@@ -138,6 +142,8 @@ import WebSocketClientProvider, {
 
 ## Streamable HTTP
 
+完整配置、线上会话和限制见 [Streamable HTTP](/transport/nact/http-stream)，框架集成见 [Next.js 与 Nuxt](/transport/nact/frameworks)。
+
 Streamable HTTP 把一条逻辑双向连接映射到两个 HTTP 方向：
 
 - Server 到 Client：一个持续的二进制 HTTP Response。
@@ -158,11 +164,11 @@ sequenceDiagram
 
 Provider 不使用 SSE、Base64 或 JSON 转换。CBOR payload 与 NACT Frame 可以包含任意二进制内容，并在 HTTP Stream 中保持原样。
 
-Server 包拥有并启动 HTTP Server，Client 包主动发起 Stream 与 POST。
+Server 包默认入口拥有并启动 HTTP Server；该包的 `/handler` 子入口只提供 Web Request/Response 会话处理，不创建端口。Next.js 与 Nuxt Provider 复用此子入口。Client 包主动发起 Stream 与 POST。
 
 ## Custom Provider
 
-如果应用已经拥有 HTTP/WebSocket Server，或平台只向函数交付 Request，不要使用 Server Provider 接管宿主，改用 Custom Provider 接入已有连接。
+已有 Next.js 或 Nuxt 服务使用对应的框架 Provider；其他 Fetch 路由可挂载 HTTP 包的 `/handler`。已有 WebSocket、IPC 等双向字节连接可以使用 Custom Provider。
 
 详见[自定义传输Provider](/transport/nact/provider)。
 

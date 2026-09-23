@@ -1,3 +1,4 @@
+import { useProviders, clientSpec } from '../_providers.mjs'
 /**
  * edge/napp — 联测的临界与压力。真进程、真 socket。
  *
@@ -49,11 +50,11 @@ async function spawnPeer(cfg) {
 
 /** 起一个本地 App，绑好默认 Processor，连到对端。 */
 async function localApp(id, expect, spec, opt) {
-  const app = new NApp({ id, opt })
+  const app = useProviders(new NApp({ id, opt }))
   app.bindProcessor('event', makeNaceb().nacpAdaptor)
   app.bindProcessor('ability', makeNacab().nacpAdaptor)
   await app.start()
-  await app.connect(expect, spec)
+  await app.connect(expect, clientSpec(spec))
   return app
 }
 

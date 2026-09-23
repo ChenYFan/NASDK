@@ -1,3 +1,4 @@
+import { useProviders, clientSpec } from '../_providers.mjs'
 /**
  * full/napp — 联测。真进程、真 socket，覆盖门面正常会走到的路径。
  *
@@ -48,7 +49,7 @@ async function spawnPeer(cfg) {
 // ── 装配 ──
 
 test('两个 kind 都不绑也能 start —— 自动兜默认 Processor', async () => {
-  const app = new NApp({ id: 'bare' })
+  const app = useProviders(new NApp({ id: 'bare' }))
   await app.start()
 
   assert.ok(app.default.NACEB instanceof NACEB, '空缺的 event 侧兜了 NACEB')
@@ -59,7 +60,7 @@ test('两个 kind 都不绑也能 start —— 自动兜默认 Processor', async
 })
 
 test('自己绑了就不兜，app.default 保持空', async () => {
-  const app = new NApp({ id: 'own' })
+  const app = useProviders(new NApp({ id: 'own' }))
   app.bindProcessor('event', makeNaceb().nacpAdaptor)
   app.bindProcessor('ability', makeNacab().nacpAdaptor)
   await app.start()
@@ -70,7 +71,7 @@ test('自己绑了就不兜，app.default 保持空', async () => {
 })
 
 test('bindProcessor 绑 ability 时注入 NApp 自己的能力', async () => {
-  const app = new NApp({ id: 'x' })
+  const app = useProviders(new NApp({ id: 'x' }))
   const nacab = new NACAB()
   assert.deepEqual(nacab.listAbility(), [], '绑之前是空的')
 
@@ -86,7 +87,7 @@ test('绑一个自制 Processor 也行 —— NACP 只认契约', async () => {
     push: (spec, hooks) => { calls.push(spec.target); hooks.onResponse({ from: 'custom' }, true) },
     register: (item) => calls.push(`register:${item.name}`),
   }
-  const app = new NApp({ id: 'c', server: [tcp(PORT.nappC)] })
+  const app = useProviders(new NApp({ id: 'c', server: [tcp(PORT.nappC)] }))
   app.bindProcessor('ability', custom)
   await app.start()
 
@@ -103,7 +104,7 @@ test('绑一个自制 Processor 也行 —— NACP 只认契约', async () => {
 })
 
 test('buildDecl 从 Processor 现算；显式 decl 覆盖它', async () => {
-  const app = new NApp({ id: 'd' })
+  const app = useProviders(new NApp({ id: 'd' }))
   app.bindProcessor('event', makeNaceb().nacpAdaptor)
   app.bindProcessor('ability', makeNacab().nacpAdaptor)
   await app.start()
@@ -112,7 +113,7 @@ test('buildDecl 从 Processor 现算；显式 decl 覆盖它', async () => {
   assert.ok(decl.abilities.some(a => a.name === 'add'))
   await app.terminate()
 
-  const explicit = new NApp({ id: 'd2', decl: { events: [{ name: 'only', description: 'x' }], abilities: [] } })
+  const explicit = useProviders(new NApp({ id: 'd2', decl: { events: [{ name: 'only', description: 'x' }], abilities: [] } }))
   explicit.bindProcessor('event', makeNaceb().nacpAdaptor)
   await explicit.start()
   assert.deepEqual(explicit.buildDecl(), { events: [{ name: 'only', description: 'x' }], abilities: [] })
@@ -126,7 +127,7 @@ test('没有 id 直接抛', () => {
 // ── 生命周期 ──
 
 test('start 幂等，重复调不重复监听', async () => {
-  const app = new NApp({ id: 'idem', server: [tcp(PORT.napp)] })
+  const app = useProviders(new NApp({ id: 'idem', server: [tcp(PORT.napp)] }))
   await app.start()
   await app.start()
   await app.start()
@@ -135,7 +136,7 @@ test('start 幂等，重复调不重复监听', async () => {
 })
 
 test('connect 前必须 start', async () => {
-  const app = new NApp({ id: 'notyet' })
+  const app = useProviders(new NApp({ id: 'notyet' }))
   await assert.rejects(app.connect('anyone', tcp(PORT.napp)), (e) => e.code === 'not-started')
   await app.terminate()
 })
@@ -522,7 +523,7 @@ test('一个 App 同开三种入口，三种都能连', async () => {
 
   for (const spec of specs) {
     const cli = await startApp(`cli-${spec.type}`)
-    await cli.app.connect('multi', spec)
+    await cli.app.connect('multi', clientSpec(spec))
     const res = await cli.app.request('multi', { kind: 'ability', target: 'add', payload: { a: 1, b: 2 } }).response
     assert.equal(res.payload, 3, spec.type)
     await cli.stop()
@@ -536,7 +537,7 @@ test('一个 App 连多个对端，互不干扰', async () => {
   const me = await startApp('hub')
 
   await me.app.connect('A', tcp(PORT.napp))
-  await me.app.connect('B', ws(PORT.nappB))
+  await me.app.connect('B', clientSpec(ws(PORT.nappB)))
 
   const [ra, rb] = await Promise.all([
     me.app.request('A', { kind: 'ability', target: 'echo', payload: { who: 'A' } }).response,

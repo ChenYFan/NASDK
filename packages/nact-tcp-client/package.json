@@ -2,11 +2,39 @@
   "name": "@chenyfan/nact-tcp-client",
   "version": "1.0.4",
   "type": "module",
-  "files": ["dist/index.js", "dist/index.js.map", "dist/index.d.ts", "dist/index.d.ts.map"],
+  "files": [
+    "dist"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "scripts": { "build": "tsc -p tsconfig.build.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
-  "peerDependencies": { "@chenyfan/nasdk": ">=1.0.4" },
-  "peerDependenciesMeta": { "@chenyfan/nasdk": { "optional": true } }
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "peerDependencies": {
+    "@chenyfan/nasdk": ">=1.0.4"
+  },
+  "peerDependenciesMeta": {
+    "@chenyfan/nasdk": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@chenyfan/nact-channel": "1.0.4"
+  },
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ChenYFan/NASDK.git",
+    "directory": "packages/nact-tcp-client"
+  }
 }

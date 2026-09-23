@@ -1,6 +1,22 @@
 {
   "extends": "./tsconfig.provider.json",
   "compilerOptions": {
-    "paths": { "@chenyfan/nasdk/NACT": ["./dist/NACT/index.d.ts"] }
+    "paths": {
+      "@chenyfan/nasdk/NACT": [
+        "./dist/NACT/index.d.ts"
+      ],
+      "@chenyfan/nact-*": [
+        "./packages/nact-*/dist/index.d.ts"
+      ],
+      "@chenyfan/nact-streamable-http-server/handler": [
+        "./packages/nact-streamable-http-server/dist/handler.d.ts"
+      ],
+      "@chenyfan/nact-channel/socket": [
+        "./packages/nact-channel/dist/socket.d.ts"
+      ],
+      "@chenyfan/nact-channel/websocket": [
+        "./packages/nact-channel/dist/websocket.d.ts"
+      ]
+    }
   }
 }

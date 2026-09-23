@@ -467,8 +467,8 @@ test('自定义 chunkSize 生效：小 chunk 迫使大量分片，消息仍完�
   await stop()
 })
 
-test('heartbeat: -1 关闭心跳，连接照常工作', async () => {
-  const spec = tcp(PORT.nact + 8, { heartbeat: -1 })
+test('keepAlive: false 关闭 TCP keepalive，连接照常工作', async () => {
+  const spec = tcp(PORT.nact + 8, { keepAlive: false })
   const { cli, stop } = await startPair(spec)
   const res = await cli.request('srv', { kind: 'ability', target: 'add', payload: { a: 1, b: 1 } }).response
   assert.equal(res.payload, 2)

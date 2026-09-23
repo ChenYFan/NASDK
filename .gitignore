@@ -4,3 +4,6 @@ docs/.vitepress/cache/
 docs/.vitepress/dist/
 .DS_Store
 *.tsbuildinfo
+**/.next/
+**/.nuxt/
+**/.output/

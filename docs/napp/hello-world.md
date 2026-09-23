@@ -5,7 +5,7 @@
 ## 安装
 
 ```bash
-npm install @chenyfan/nasdk \
+bun add @chenyfan/nasdk \
   @chenyfan/nact-websocket-server \
   @chenyfan/nact-websocket-client
 ```
@@ -71,13 +71,13 @@ await hello.terminate()
 先启动 `world`：
 
 ```bash
-node world.mjs
+bun world.mjs
 ```
 
 再打开另一个终端运行 `hello`：
 
 ```bash
-node hello.mjs
+bun hello.mjs
 ```
 
 输出为：

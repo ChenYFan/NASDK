@@ -8,6 +8,7 @@
  */
 
 import NApp from '../index.ts'
+import { useProviders, clientSpec } from './_providers.mjs'
 import { NACEB, PipelineHandler, TaskHandler } from '../NACEB/index.ts'
 import { NACAB } from '../NACAB/index.ts'
 
@@ -25,9 +26,9 @@ export const PORT = {
 /** A unix socket path unique to this process AND this name, so concurrent runs never share one. */
 export const sock = (name) => `/tmp/nasdk-t-${name}-${process.pid}.sock`
 
-export const tcp = (port, opt = {}) => ({ type: 'tcp', opt: { ip: '127.0.0.1', port, ...opt } })
-export const ws = (port, opt = {}) => ({ type: 'ws', opt: { ip: '127.0.0.1', port, path: '/ws', ...opt } })
-export const unix = (name, opt = {}) => ({ type: 'unix', opt: { socketPath: sock(name), ...opt } })
+export const tcp = (port, opt = {}) => ({ type: 'tcp', provider: { host: '127.0.0.1', port, keepAlive: opt.keepAlive }, nact: { chunkSize: opt.chunkSize } })
+export const ws = (port, opt = {}) => ({ type: 'websocket', provider: { host: '127.0.0.1', port, path: '/ws' }, nact: { chunkSize: opt.chunkSize } })
+export const unix = (name, opt = {}) => ({ type: 'unix', provider: { path: sock(name) }, nact: { chunkSize: opt.chunkSize } })
 
 // ── handlers ───────────────────────────────────────────────────────────────────────────────────────────
 
@@ -131,7 +132,7 @@ export function makeNacab() {
 /** Assemble + start an App with both kit processors bound. Returns the App and the two processors, because a
  *  test asserting on processor-internal observation needs the instances, not just the adaptors. */
 export async function startApp(id, { server = [], opt, bind = true } = {}) {
-  const app = new NApp({ id, server, opt })
+  const app = useProviders(new NApp({ id, server, opt }))
   let naceb, nacab
   if (bind) {
     naceb = makeNaceb(); nacab = makeNacab()
@@ -146,7 +147,7 @@ export async function startApp(id, { server = [], opt, bind = true } = {}) {
 export async function startPair(spec, { serverId = 'srv', clientId = 'cli', serverOpt, clientOpt } = {}) {
   const s = await startApp(serverId, { server: [spec], opt: serverOpt })
   const c = await startApp(clientId, { opt: clientOpt })
-  await c.app.connect(serverId, spec)
+  await c.app.connect(serverId, clientSpec(spec))
   return {
     srv: s.app, cli: c.app, naceb: s.naceb, nacab: s.nacab, cliNaceb: c.naceb, cliNacab: c.nacab,
     stop: async () => { await c.stop().catch(() => {}); await s.stop().catch(() => {}) },

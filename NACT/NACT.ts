@@ -17,7 +17,9 @@ import { CustomTransportProvider } from './provider.ts'
 export class NACT {
   private peerTable = new PeerConnectionTable()
   /** One closer per listen(); carrier-agnostic. */
-  private closers: Array<() => Promise<void>> = []
+  private closers = new Set<() => Promise<void>>()
+  private stopped = false
+  private termination?: Promise<void>
   private serverProviders = new Map<string, ServerTransportProvider<string, unknown>>()
   private clientProviders = new Map<string, ClientTransportProvider<string, unknown>>()
   private customProviders = new Set<string>()
@@ -54,6 +56,13 @@ export class NACT {
   listPeerId(): NACTPeerId[] { return this.peerTable.listPeerId() }
 
   use(provider: TransportProvider): void {
+    this.assertActive()
+    this.chunkSize(provider.defaultChunkSize)
+    if (!provider.type || !['custom', 'server', 'client'].includes(provider.role))
+      throw nactInternal('invalid-provider', 'Provider requires a type and a valid role')
+    if (provider.role === 'server' && typeof (provider as ServerTransportProvider).listen !== 'function'
+      || provider.role === 'client' && typeof (provider as ClientTransportProvider).dial !== 'function')
+      throw nactInternal('invalid-provider', 'Provider must implement its role method')
     if (provider.role === 'custom') {
       if (this.customProviders.has(provider.type))
         throw nactInternal('provider-already-registered', `custom Provider '${provider.type}' is already registered`)
@@ -100,7 +109,21 @@ export class NACT {
   }
 
   private acceptChannel(channel: TransportChannel, chunkSize: number): Peer {
+    if (this.stopped) {
+      void Promise.resolve(channel.terminate ? channel.terminate() : channel.close()).catch(() => {})
+      this.assertActive()
+    }
     return makeChannelPeer(this.host, channel, chunkSize)
+  }
+
+  private assertActive() {
+    if (this.stopped) throw nactInternal('transport-stopped', 'NACT is terminated')
+  }
+
+  private chunkSize(value: number): number {
+    if (!Number.isSafeInteger(value) || value <= 0 || value > 2 ** 31)
+      throw nactInternal('invalid-chunk-size', 'chunkSize must be an integer between 1 and 2GiB')
+    return value
   }
 
   private providerNotFound(role: 'server' | 'client', type: string): never {
@@ -108,25 +131,44 @@ export class NACT {
   }
 
   async listen(spec: TransportSpec, onPeer: (peer: Peer) => void = () => {}): Promise<ServerHandle> {
+    this.assertActive()
     const provider = this.serverProviders.get(spec.type) ?? this.providerNotFound('server', spec.type)
-    const chunkSize = spec.nact?.chunkSize ?? provider.defaultChunkSize
-    const handle = await provider.listen(spec.provider, (channel) => onPeer(this.acceptChannel(channel, chunkSize)))
-    this.closers.push(handle.close)
-    return handle
+    const chunkSize = this.chunkSize(spec.nact?.chunkSize ?? provider.defaultChunkSize)
+    const handle = await provider.listen(spec.provider, (channel) => {
+      if (this.stopped) {
+        try { void Promise.resolve(channel.terminate ? channel.terminate() : channel.close()).catch(() => {}) }
+        catch { /* shutdown already owns this connection */ }
+        return
+      }
+      onPeer(this.acceptChannel(channel, chunkSize))
+    })
+    if (this.stopped) { await handle.close(); this.assertActive() }
+    let closing: Promise<void> | undefined
+    const close = () => closing ??= Promise.resolve().then(() => handle.close()).finally(() => this.closers.delete(close))
+    this.closers.add(close)
+    return { close }
   }
 
   async dial(spec: TransportSpec): Promise<Peer> {
+    this.assertActive()
     const provider = this.clientProviders.get(spec.type) ?? this.providerNotFound('client', spec.type)
+    const chunkSize = this.chunkSize(spec.nact?.chunkSize ?? provider.defaultChunkSize)
     const channel = await provider.dial(spec.provider)
-    return this.acceptChannel(channel, spec.nact?.chunkSize ?? provider.defaultChunkSize)
+    return this.acceptChannel(channel, chunkSize)
   }
 
   /** Drop every connection and server entry. */
-  async terminate() {
+  terminate(): Promise<void> {
+    if (this.termination) return this.termination
+    this.stopped = true
     // Clear the table first so the sockets' 'close' events find no row and stay quiet.
-    for (const p of this.peerTable.listPeer()) { try { p.close() } catch { /* already dead */ } }
+    const peers = this.peerTable.listPeer()
     this.peerTable.clear()
-    await Promise.all(this.closers.map(close => close()))
-    this.closers = []
+    for (const p of peers) { try { if (p.terminate) p.terminate(); else p.close() } catch { /* already dead */ } }
+    this.termination = Promise.allSettled([...this.closers].map(close => close())).then(results => {
+      const errors = results.filter(r => r.status === 'rejected').map(r => r.reason)
+      if (errors.length) throw new AggregateError(errors, 'Provider shutdown failed')
+    })
+    return this.termination
   }
 }

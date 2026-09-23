@@ -26,7 +26,7 @@ class CustomChannel implements TransportChannel {
 
   send(chunks: readonly Uint8Array[]) { return this.sink.send(chunks) }
   close() { return this.sink.close() }
-  terminate() { return this.sink.terminate?.() ?? this.sink.close() }
+  terminate() { return this.sink.terminate ? this.sink.terminate() : this.sink.close() }
 
   onReceive(handler: ReceiveHandler): () => void {
     this.lockReceiveMode('callback')

@@ -1,3 +1,4 @@
+import { useProviders, clientSpec } from '../_providers.mjs'
 /**
  * full/napp 的可编排服务端。simple/_server.mjs 的加强版：能起多个入口、能按命令 emit、能查状态。
  *
@@ -15,7 +16,7 @@ const cfg = JSON.parse(process.argv[2])
 
 const naceb = makeNaceb()
 const nacab = makeNacab()
-const app = new NApp({ id: cfg.id, server: cfg.server ?? [], opt: cfg.opt })
+const app = useProviders(new NApp({ id: cfg.id, server: cfg.server ?? [], opt: cfg.opt }))
 app.bindProcessor('event', naceb.nacpAdaptor)
 app.bindProcessor('ability', nacab.nacpAdaptor)
 await app.start()
@@ -29,7 +30,7 @@ process.on('message', async (m) => {
       case 'peers':      return reply(m.id, { peers: app.listConnectedApp() })
       case 'decl':       return reply(m.id, { decl: app.buildDecl() })
       case 'subcount':   return reply(m.id, { subs: app.nacp.getSubCount(), listens: app.nacp.getListenCount() })
-      case 'connect':    await app.connect(m.expect, m.spec); return reply(m.id, { ok: true })
+      case 'connect':    await app.connect(m.expect, clientSpec(m.spec)); return reply(m.id, { ok: true })
       case 'disconnect': return reply(m.id, { dropped: await app.disconnect(m.appId) })
       case 'request': {
         const res = await app.request(m.to, m.opt).response

@@ -1,14 +1,37 @@
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
-    "lib": ["ES2022", "DOM"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
     "baseUrl": ".",
-    "paths": { "@chenyfan/nasdk/NACT": ["./NACT/index.ts"] },
+    "paths": {
+      "@chenyfan/nasdk/NACT": [
+        "./NACT/index.ts"
+      ],
+      "@chenyfan/nact-*": [
+        "./packages/nact-*/index.ts"
+      ],
+      "@chenyfan/nact-streamable-http-server/handler": [
+        "./packages/nact-streamable-http-server/handler.ts"
+      ],
+      "@chenyfan/nact-channel/socket": [
+        "./packages/nact-channel/socket.ts"
+      ],
+      "@chenyfan/nact-channel/websocket": [
+        "./packages/nact-channel/websocket.ts"
+      ]
+    },
     "noEmit": false,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
     "removeComments": false
   },
-  "exclude": ["node_modules", "dist"]
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

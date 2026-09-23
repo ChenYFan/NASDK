@@ -15,7 +15,7 @@ NASDK默认只提供CustomProvider接入。
 Web环境不能主动监听端口，因此只使用Client Provider。
 
 ```bash
-npm install @chenyfan/nasdk @chenyfan/nact-websocket-client
+bun add @chenyfan/nasdk @chenyfan/nact-websocket-client
 ```
 
 ```ts
@@ -41,13 +41,13 @@ Node.js可以使用Server Provider监听，也可以使用Client Provider主动�
 只提供WebSocket监听：
 
 ```bash
-npm install @chenyfan/nasdk @chenyfan/nact-websocket-server
+bun add @chenyfan/nasdk @chenyfan/nact-websocket-server
 ```
 
 同时监听和主动连接：
 
 ```bash
-npm install \
+bun add \
   @chenyfan/nasdk \
   @chenyfan/nact-websocket-server \
   @chenyfan/nact-websocket-client
@@ -70,7 +70,7 @@ TCP、Unix Socket和Streamable HTTP的使用方式相同，只需要替换安装
 Cloudflare Workers等运行时可以使用Web标准的Client Provider主动连接：
 
 ```bash
-npm install @chenyfan/nasdk @chenyfan/nact-websocket-client
+bun add @chenyfan/nasdk @chenyfan/nact-websocket-client
 ```
 
 Worker没有自行`listen()`的过程。如果需要接收平台交付的Request或`WebSocketPair`，应由Worker完成路由与鉴权，再通过[自定义传输Provider](/transport/nact/provider)接入NACT。
@@ -81,7 +81,7 @@ Vercel Functions等Serverless运行时与Worker相同：
 
 - 主动连接外部NApp时，安装对应的Client Provider。
 - 接收平台交付的Request时，使用Custom Provider接入。
-- 能够长期保持二进制Response时，可以使用Streamable HTTP。
+- 仅当平台允许持续二进制 Response、会话请求到达同一常驻实例，且实例寿命覆盖任务时，才适合当前 Streamable HTTP。
 
 :::warning
 Streamable HTTP需要在下行Stream与上行POST之间保持同一个session。
@@ -93,9 +93,9 @@ Streamable HTTP需要在下行Stream与上行POST之间保持同一个session。
 
 已有Fastify、Hono、Nuxt、Next或其他HTTP Server时，不要再启动同端口的Server Provider。
 
-由现有服务完成route、auth和upgrade，再通过Custom Provider把连接交给NACT。
+Next.js App Router 使用 `@chenyfan/nact-nextjs`，Nuxt/Nitro 使用 `@chenyfan/nact-nuxt`。它们挂载现有路由，不再监听端口。示例与生命周期见[框架 Provider](/transport/nact/frameworks)。
 
-未来可能会对已有的HTTPServer设计单独的附加提供器，具体可参见[官方Provider](/transport/nact/transport)页面。
+其他 Fetch 兼容路由可以使用 `@chenyfan/nact-streamable-http-server/handler`。WebSocket upgrade 或其他宿主通道仍可通过 Custom Provider 接入。
 
 :::details
 
@@ -106,8 +106,8 @@ NASDK core只包含NACT、Provider接口与Custom Provider，不依赖或转导�
 Provider必须由应用显式安装：
 
 ```bash
-npm install @chenyfan/nasdk @chenyfan/nact-websocket-client
-npm run build
+bun add @chenyfan/nasdk @chenyfan/nact-websocket-client
+bun run build
 ```
 
 构建过程不会自动下载Provider。应用应正常提交lockfile，保证缓存、离线构建与依赖版本可复现。

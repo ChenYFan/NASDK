@@ -18,21 +18,37 @@ Nyirusu Application Software Development Kit 是一款全双工通信协议与�
 
 ## 安装
 
-需要 Node.js 20+。
+支持 Node.js 20+；本仓库使用 Bun 安装、构建和测试。物理传输 Provider 需要单独安装并注册。
 
 ```bash
-npm install @chenyfan/nasdk
+bun add @chenyfan/nasdk
 ```
 
 ## 文档
 
 [NASDK 中文文档](https://nasdk.eurekac.cn)
 
-- [开始使用](./docs/guide/getting-started.md)
-- [NApp 与请求句柄](./docs/guide/napp.md)
-- [Event、Ability 与 Signal](./docs/guide/event-ability.md)
+- [开始使用](./docs/napp/hello-world.md)
+- [NApp 与请求句柄](./docs/napp/handles-and-errors.md)
+- [Event、Ability 与 Signal](./docs/workflow/processor.md)
 - [完整文档站](./docs/index.md)
-- [设计意图](./docs/design/overview.md)
+- [设计意图](./docs/design/principles.md)
+
+## 开发
+
+```bash
+bun install --frozen-lockfile
+bun run build
+bun run typecheck
+bun run test
+bun run test:edge:slow
+bun run test:framework
+bun run docs:build
+```
+
+`bun run test` 会先构建全部独立包，再执行 simple、full、edge；`test:edge:slow` 额外覆盖 10 秒、30 秒和 120 秒的真实超时路径。
+
+Next.js App Router 与 Nuxt/Nitro 的可运行示例位于 [examples/nextjs](./examples/nextjs) 和 [examples/nuxt](./examples/nuxt)。接入方式见[框架 Provider](./docs/transport/nact/frameworks.md)。
 
 ## License
 

@@ -51,16 +51,18 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && npm run build --workspaces --if-present",
-    "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck --workspaces --if-present",
-    "prepublishOnly": "npm run build",
-    "test": "npm run test:simple",
-    "test:simple": "node --import tsx --test test/simple/*.test.mjs",
-    "test:full": "node --import tsx --test test/full/*.test.mjs",
-    "test:edge": "node --import tsx --test test/edge/*.test.mjs",
-    "docs:dev": "vitepress dev docs",
-    "docs:build": "vitepress build docs",
-    "docs:preview": "vitepress preview docs"
+    "build": "bun scripts/workspaces.mjs build",
+    "typecheck": "bun scripts/workspaces.mjs typecheck",
+    "prepublishOnly": "bun run build",
+    "test": "bun run build && bun run test:simple && bun run test:full && bun run test:edge",
+    "test:simple": "bun test ./test/simple/*.test.mjs --timeout 30000",
+    "test:full": "bun test ./test/full/*.test.mjs --timeout 30000",
+    "test:edge": "bun test ./test/edge/*.test.mjs --timeout 30000",
+    "docs:dev": "bun --bun vitepress dev docs",
+    "docs:build": "bun --bun vitepress build docs",
+    "docs:preview": "bun --bun vitepress preview docs",
+    "test:edge:slow": "NASDK_SLOW=1 bun test ./test/edge/*.test.mjs --timeout 180000",
+    "test:framework": "bun scripts/test-frameworks.mjs"
   },
   "publishConfig": {
     "access": "public"
@@ -74,7 +76,8 @@
     "mermaid": "10.9.5",
     "tsx": "4.20.5",
     "typescript": "^5.9.0",
-    "vitepress": "1.6.4"
+    "vitepress": "1.6.4",
+    "h3": "^1.15.4"
   },
   "engines": {
     "node": ">=20"
@@ -90,5 +93,6 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ChenYFan/NASDK.git"
-  }
+  },
+  "packageManager": "bun@1.4.2"
 }

@@ -22,7 +22,7 @@ interface ServerHandle {
 }
 ```
 
-每个入口相互独立，调用 `ServerHandle.close()` 只关闭对应入口，已建立的 Peer 由 NACT 继续持有，不随入口关闭。
+每个入口相互独立。TCP、Unix、WebSocket 的 `ServerHandle.close()` 停止接受新连接，并等待已有连接结束；已有 Peer 应先关闭。HTTP 和框架 Provider 的入口拥有会话表，关闭入口也会关闭其全部 HTTP 会话。NACT 包装返回的 handle，使重复关闭只执行一次。
 
 底层传输与 `TransportSpec` 见[底层传输](/transport/nact/transport)。
 
@@ -85,10 +85,14 @@ NApp重连宽限、消息回退和补发由 [NACP 生命周期](/transport/nacp/
 
 `nact.terminate()` 会：
 
-1. 关闭全部 Peer。
-2. 清空 `peerTable`。
+1. 清空 `peerTable`。
+2. 终止全部 Peer（支持强制关闭时使用 `terminate`）。
 3. 关闭全部监听入口。
 
 终止时连接表会先被清空，随后到达的底层 `close` 不再产生逐个 `nact:peer:disconnect`。
 
 完整的 NApp 停机流程由 [NApp 生命周期](/napp/advanced/lifecycle) 负责，生命周期事件见[可观测](/transport/nact/observability)。
+
+终止是幂等、不可恢复的。终止后注册 Provider、监听、拨号和 Custom `open()` 都会失败。停机过程中才返回的拨号 Channel 也会被关闭，不再入表。
+
+正常关闭 Peer 会先等待已接受的异步发送完成，保证 unregister 的最终响应先离开；发送失败或整层终止则立即中断。Provider 的异步 close/send 失败会进入 `nact:peer:error`，并清理 Peer 与监听回调。

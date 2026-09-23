@@ -1,0 +1,21 @@
+{
+  "name": "nasdk-nuxt-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --bun nuxt dev",
+    "build": "bun --bun nuxt build",
+    "start": "bun .output/server/index.mjs"
+  },
+  "dependencies": {
+    "@chenyfan/nact-nuxt": "file:../../packages/nact-nuxt",
+    "@chenyfan/nact-channel": "file:../../packages/nact-channel",
+    "@chenyfan/nact-streamable-http-server": "file:../../packages/nact-streamable-http-server",
+    "nuxt": "4.5.2",
+    "h3": "^1.15.4"
+  },
+  "overrides": {
+    "@chenyfan/nact-channel": "file:../../packages/nact-channel",
+    "@chenyfan/nact-streamable-http-server": "file:../../packages/nact-streamable-http-server"
+  }
+}

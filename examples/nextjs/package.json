@@ -1,0 +1,22 @@
+{
+  "name": "nasdk-nextjs-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --bun next dev",
+    "build": "bun --bun next build --webpack",
+    "start": "bun --bun next start"
+  },
+  "dependencies": {
+    "@chenyfan/nact-nextjs": "file:../../packages/nact-nextjs",
+    "@chenyfan/nact-channel": "file:../../packages/nact-channel",
+    "@chenyfan/nact-streamable-http-server": "file:../../packages/nact-streamable-http-server",
+    "next": "16.3.6",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "overrides": {
+    "@chenyfan/nact-channel": "file:../../packages/nact-channel",
+    "@chenyfan/nact-streamable-http-server": "file:../../packages/nact-streamable-http-server"
+  }
+}

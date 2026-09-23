@@ -179,6 +179,8 @@ export default defineConfig({
             { text: "NACT Framing", link: "/transport/nact/framing" },
             { text: "底层传输", link: "/transport/nact/transport" },
             { text: "运行时接入", link: "/transport/nact/runtime-build" },
+            { text: "Streamable HTTP", link: "/transport/nact/http-stream" },
+            { text: "Next.js 与 Nuxt", link: "/transport/nact/frameworks" },
             {
               text: "进阶",
               items: [

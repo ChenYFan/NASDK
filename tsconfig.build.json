@@ -8,5 +8,5 @@
     "sourceMap": true,
     "removeComments": false
   },
-  "exclude": ["dist", "node_modules", "docs", "packages", "**/*.test.ts", "**/*.spec.ts"]
+  "exclude": ["dist", "node_modules", "docs", "packages", "examples", "**/*.test.ts", "**/*.spec.ts"]
 }
