@@ -5,16 +5,16 @@ new NApp({
   id: string,
   server?: [
     {
-      type: "tcp",
-      opt: {
-        ip: string,
+      type: "websocket",
+      provider: {
+        host: string,
         port: number,
-        heartbeat?: number,
+      },
+      nact?: {
         chunkSize?: number,
-        compression?: "none" | "cbor-records",
       },
     },
-    // 也可使用 ws 或 unix，详见下文
+    // 具体 type 和 provider 形状由安装的 Provider 包定义
   ],
   decl?: {
     events: { name: string, description: string }[],
@@ -50,23 +50,24 @@ const app = new NApp({ id: "world" })
 > `server?: TransportSpec[]`
 > 默认值：`[]`
 
-声明 NApp 对外监听的入口。一个 NApp 可以同时提供多个入口：
+声明 NApp 对外监听的入口。一个 NApp 可以同时提供多个入口，但必须在 `start()` 前注册每个 type 对应的 Server Provider：
 
 ```js
-server: [
-  { type: "tcp", opt: { ip: "127.0.0.1", port: 18900 } },
-  { type: "ws", opt: { ip: "127.0.0.1", port: 18901, path: "/nacp" } },
-  { type: "unix", opt: { socketPath: "/tmp/world.sock" } },
-]
+const app = new NApp({
+  id: 'world',
+  server: [{
+    type: 'websocket',
+    provider: { host: '127.0.0.1', port: 18901, path: '/nacp' },
+    nact: { chunkSize: 100 * 1024 * 1024 },
+  }],
+})
+
+app.nact.use(new WebSocketServerProvider())
 ```
 
-| `type` | 必填地址     | 可选参数                                        |
-| ------ | ------------ | ----------------------------------------------- |
-| `tcp`  | `ip`、`port` | `heartbeat`、`chunkSize`、`compression`         |
-| `ws`   | `ip`、`port` | `path`、`heartbeat`、`chunkSize`、`compression` |
-| `unix` | `socketPath` | `heartbeat`、`chunkSize`、`compression`         |
+`type` 用于查找 Provider，`provider` 由对应 Provider 定义并原样接收，`nact` 只包含 NACT core 的连接选项。具体类型从 Provider 包导入，不由 NASDK core 维护所有物理地址的联合类型。
 
-`heartbeat: -1` 可关闭心跳；`chunkSize` 是本地发送侧的分片阈值，tcp和ws默认100M，unix不分包。
+`nact.chunkSize` 是本地发送侧的分片阈值；省略时使用 Provider 声明的推荐默认值。heartbeat/keepalive 属于物理连接，放在 Provider 自己的配置中。
 
 通常无需调整这些可选参数。
 
@@ -132,7 +133,7 @@ opt: {
 await app.start()
 ```
 
-`start()` 会监听所有 `server` 入口，并允许连接到其他应用。
+`start()` 会按每个 Spec 的 `type` 查找已注册 Server Provider，并监听所有 `server` 入口，随后允许连接到其他应用。缺失 Provider 时立即以 `provider-not-found` 失败。
 
 :::warning
 即使没有任何入口，也必须要start，否则无法启动和连接到其他应用。
@@ -141,9 +142,12 @@ await app.start()
 ## 连接到其他应用
 
 ```js
-await app.connect("another-app-id", {
-  type: "tcp",
-  opt: { ip: "127.0.0.1", port: 18900 },
+import WebSocketClientProvider from '@chenyfan/nact-websocket-client'
+
+app.nact.use(new WebSocketClientProvider())
+await app.connect('another-app-id', {
+  type: 'websocket',
+  provider: { url: 'ws://127.0.0.1:18900/nacp' },
 })
 ```
 

@@ -38,7 +38,7 @@ Peer 成功移出 `peerTable` 后触发，同一 Peer 只会触发一次。
 
 NACP 收到该事件后，将对应 App 转为 `offline`。
 
-eer 与 App 的后续生命周期见 [NACT 生命周期](/transport/nact/lifecycle)和 [NACP 生命周期](/transport/nacp/lifecycle)。
+Peer 与 App 的后续生命周期见 [NACT 生命周期](/transport/nact/lifecycle)和 [NACP 生命周期](/transport/nacp/lifecycle)。
 
 :::tip
 `nact.terminate()` 会先清空 `peerTable`，因此整层终止时不会为每个 Peer 分别触发 `nact:peer:disconnect`。

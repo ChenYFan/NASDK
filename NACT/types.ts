@@ -1,37 +1,55 @@
-/**
- * NACT types — TransportSpec (carrier + address), Peer (uniform physical connection), Codec, ServerHandle.
- */
+/** NACT core types. Physical addresses and runtime options belong to Transport Providers. */
 
 import type { NACPMessage } from '../NACP/types.ts'
 export type { NACPMessage }   // re-exported so NACT-internal modules import message types from one place
 
-// ============================================================
-// Carrier + address. No Client/Server distinction: direction is decided by where the spec is used.
-// ============================================================
-
-export type Transport = 'ws' | 'tcp' | 'unix'
-
-/** CBOR encoding mode; MVP is fixed 'none' (reserved negotiation slot, NACT does not read it yet). */
-export type CompressionKind = 'none' | 'cbor-records'
-
-/** Heartbeat interval in ms; `-1` disables. No separate timeout — the deadline IS the next interval
- *  (worst-case detection 2×). ws uses protocol ping/pong; tcp/unix use OS TCP keepalive. */
-export type HeartbeatMs = number
-
-export interface ServerOptBase {
-  compression?: CompressionKind
-  heartbeat?: HeartbeatMs         // omitted → DEFAULT_HEARTBEAT_MS, -1 → off
-  chunkSize?: number              // LOCAL send-side fragment threshold in bytes
+export interface TransportSpec<TType extends string = string, TProvider = unknown> {
+  type: TType
+  provider: TProvider
+  nact?: { chunkSize?: number }
 }
 
-export interface WSOpt   extends ServerOptBase { ip: string; port: number; path?: string }
-export interface TCPOpt  extends ServerOptBase { ip: string; port: number }
-export interface UnixOpt extends ServerOptBase { socketPath: string }
+export type TransportRole = 'server' | 'client' | 'custom'
 
-export type TransportSpec =
-  | { type: 'ws';   opt: WSOpt }
-  | { type: 'tcp';  opt: TCPOpt }
-  | { type: 'unix'; opt: UnixOpt }
+export interface TransportProvider<TType extends string = string, TOptions = unknown> {
+  readonly type: TType
+  readonly role: TransportRole
+  readonly defaultChunkSize: number
+}
+
+export interface TransportChannel extends AsyncIterable<Uint8Array> {
+  send(chunks: readonly Uint8Array[]): void | Promise<void>
+  onReceive(handler: (bytes: Uint8Array) => void): () => void
+  onClose(handler: () => void): () => void
+  onError(handler: (reason: unknown) => void): () => void
+  close(): void | Promise<void>
+  terminate?(): void | Promise<void>
+}
+
+export interface ServerTransportProvider<TType extends string = string, TOptions = unknown>
+  extends TransportProvider<TType, TOptions> {
+  readonly role: 'server'
+  listen(options: TOptions, accept: (channel: TransportChannel) => void): Promise<ServerHandle>
+}
+
+export interface ClientTransportProvider<TType extends string = string, TOptions = unknown>
+  extends TransportProvider<TType, TOptions> {
+  readonly role: 'client'
+  dial(options: TOptions): Promise<TransportChannel>
+}
+
+export interface CustomTransportSink {
+  send(chunks: readonly Uint8Array[]): void | Promise<void>
+  close(): void | Promise<void>
+  terminate?(): void | Promise<void>
+}
+
+export interface CustomTransportEndpoint {
+  readonly peerId: NACTPeerId
+  receive(bytes: Uint8Array): void
+  closed(): void
+  failed(reason: unknown): void
+}
 
 // ============================================================
 // Peer — NACT's uniform physical-connection abstraction {id, send, close}.
@@ -55,5 +73,5 @@ export interface Codec {
   decode(data: Uint8Array): NACPMessage
 }
 
-/** Handle returned by listen() — closes that one server entry. */
+/** Handle returned by a Server Provider. */
 export interface ServerHandle { close(): Promise<void> }

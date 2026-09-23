@@ -1,7 +1,5 @@
 /**
- * NACT peer contract — what a peer factory needs from NACT, and nothing else.
- * Factories live one per carrier (peer.net.ts Node-only / peer.ws.ts browser-safe) because their imports
- * differ in a way no runtime branch can paper over for a bundler.
+ * NACT peer contract — what the TransportChannel adapter needs from NACT, and nothing else.
  */
 
 import type { Codec, NACPMessage, Peer } from './types.ts'

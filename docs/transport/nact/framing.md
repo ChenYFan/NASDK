@@ -1,6 +1,8 @@
 # NACT Framing
 
-无论是否分片，NACT 都会为每段字节增加 32 Bytes Header。
+NACT在构造完整数据的时候会进行切片、分帧。
+
+无论是否切片，NACT 都会为每个帧增加 32 Bytes Header。
 
 ## NACT 消息头
 
@@ -45,9 +47,7 @@ Frame Body 紧跟在 32B Header 后，从 `0x20` 开始，长度为 `thisFrameSi
 | 30     | 1    | `magic`         | uint8      | `0xCF`   | 魔数                                                           |
 | 31     | 1    | `version`       | uint8      | `0x01`   | NACT Message版本                                               |
 
-错误的版本会出现 `version-mismatch` 错误，版本正确但 magic 不匹配会出现 `bad-magic` 错误。
 
-出错后都强制断连，没有向未来兼容解析。
 
 :::danger
 
@@ -65,14 +65,16 @@ Frame Body 紧跟在 32B Header 后，从 `0x20` 开始，长度为 `thisFrameSi
 
 NACT 内有分片机制，对于一个较大的Payload消息，NACT会切分为多个帧按序发送。
 
-tcp / ws 承载链路默认按照 100MB 分片，同机 unix 默认不分片。
+分片阈值来自 `TransportSpec.nact.chunkSize`，省略时使用当前 Provider 声明的推荐默认值。
 
-NACT 分片是设计是为穿透 TCP / WebSocket 的中间层（如 CDN 的单帧上限），同时进一步降低了内存占用。
+不同 Provider 可以推荐不同阈值，但不能改变 Header 或重组语义。
+
+NACT 分片用于穿透物理传输中间层的单次提交上限，同时进一步降低发送端合并产生的内存峰值。
 
 :::details
 1GB payload 实测：
 
-| 承载 | 分片       | wire (ms) | 接收端内存峰值 |
+| provider | 分片       | wire (ms) | 接收端内存峰值 |
 | ---- | ---------- | --------- | -------------- |
 | unix | 不分片     | 665       | 1024 MB        |
 | unix | 100MB × 11 | 668       | 1024 MB        |

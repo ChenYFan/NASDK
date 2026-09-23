@@ -9,6 +9,8 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { cborCodec } from '../../NACT/codec.ts'
+import { CustomTransportProvider } from '../../NACT/index.ts'
+import NApp from '../../index.ts'
 import {
   FRAG_HEADER, MAX_FRAME_SIZE, DEFAULT_CHUNK,
   checkFragHeader, makeReassembler, makeStreamParser, splitAndEmit, toHex,
@@ -17,6 +19,59 @@ import {
 const aMessage = (payload) => ({
   v: { major: 1, minor: 0 }, type: 'notify', id: 'm1', from: 'a', to: 'b', t: 1,
   meta: { parentId: 'p', targetSubName: 'x', hitSubName: 'x' }, payload,
+})
+
+test('Provider：未注册和重复注册会明确失败', async () => {
+  const app = new NApp({ id: 'provider-errors' })
+  await app.start()
+  await assert.rejects(
+    app.nact.dial({ type: 'missing', provider: {} }),
+    error => error.code === 'provider-not-found',
+  )
+
+  const custom = new CustomTransportProvider({ type: 'memory', provider: { channel: 'primary' } })
+  app.nact.use(custom)
+  assert.equal(custom.type, 'memory')
+  assert.deepEqual(custom.provider, { channel: 'primary' })
+  assert.doesNotThrow(
+    () => app.nact.use(new CustomTransportProvider({ type: 'electron-ipc', provider: { channel: 'renderer' } })),
+  )
+  assert.throws(
+    () => app.nact.use(new CustomTransportProvider({ type: 'memory', provider: { channel: 'backup' } })),
+    error => error.code === 'provider-already-registered',
+  )
+  await app.terminate()
+})
+
+test('CustomTransportProvider：任意拆分的字节可以形成双向 Peer', async () => {
+  const left = new NApp({ id: 'left' })
+  const right = new NApp({ id: 'right' })
+  const leftProvider = new CustomTransportProvider({ type: 'memory', provider: { side: 'left' } })
+  const rightProvider = new CustomTransportProvider({ type: 'memory', provider: { side: 'right' } })
+  left.nact.use(leftProvider)
+  right.nact.use(rightProvider)
+  await left.start()
+  await right.start()
+
+  let leftEndpoint
+  let rightEndpoint
+  leftEndpoint = leftProvider.open({
+    send: chunks => { for (const chunk of chunks) rightEndpoint.receive(chunk) },
+    close: () => rightEndpoint.closed(),
+  })
+  rightEndpoint = rightProvider.open({
+    send: chunks => { for (const chunk of chunks) leftEndpoint.receive(chunk) },
+    close: () => leftEndpoint.closed(),
+  })
+
+  const leftPeer = left.nact.getPeer(leftEndpoint.peerId)
+  assert.ok(leftPeer)
+  await left.nacp.register('right', leftPeer)
+  assert.deepEqual(left.listConnectedApp(), ['right'])
+  assert.deepEqual(right.listConnectedApp(), ['left'])
+
+  await left.terminate()
+  await right.terminate()
 })
 
 test('codec：对象 → 字节 → 对象，原样回来', () => {

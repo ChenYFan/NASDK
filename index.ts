@@ -15,7 +15,7 @@
  * Only these seven. Per-layer types, error classes, event-name constants, Handler bases, etc. come from each
  * layer's own subpath — package.json's exports open a per-layer entry:
  *
- *     import type { TransportSpec } from '@chenyfan/nasdk/NACT'
+ *     import type { WebSocketClientTransportSpec } from '@chenyfan/nact-websocket-client'
  *     import { TaskHandler, PipelineHandler } from '@chenyfan/nasdk/NACEB'
  *     import { AbilityHandler } from '@chenyfan/nasdk/NACAB'
  *     import type { Processor } from '@chenyfan/nasdk/types'

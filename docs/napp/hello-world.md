@@ -5,7 +5,9 @@
 ## 安装
 
 ```bash
-npm install @chenyfan/nasdk
+npm install @chenyfan/nasdk \
+  @chenyfan/nact-websocket-server \
+  @chenyfan/nact-websocket-client
 ```
 
 ## 创建 World NApp
@@ -13,6 +15,7 @@ npm install @chenyfan/nasdk
 
 ```js world.mjs
 import NApp, { NACAB } from '@chenyfan/nasdk'
+import WebSocketServerProvider from '@chenyfan/nact-websocket-server'
 
 const abilities = new NACAB()
 abilities.register({
@@ -22,28 +25,31 @@ abilities.register({
 })
 
 const world = new NApp({ id: 'world', server: [{
-  type: 'tcp',
-  opt: { ip: '127.0.0.1', port: 18900 },
+  type: 'websocket',
+  provider: { host: '127.0.0.1', port: 18900, path: '/nacp' },
 }]})
+world.nact.use(new WebSocketServerProvider())
 world.bindProcessor('ability', abilities.nacpAdaptor)
 
 await world.start()
-console.log('World NApp is listening on 127.0.0.1:18900')
+console.log('World NApp is listening on ws://127.0.0.1:18900/nacp')
 ```
 
-`world` 暴露了一个名为 `appendWorld` 的 Ability，并开启一个在18900端口上的TCP Server供外部链接。
+`world` 暴露了一个名为 `appendWorld` 的 Ability，并通过独立安装的 WebSocket Server Provider 开启监听入口。
 
 ## 创建 Hello NApp
 
 
 ```js hello.mjs
 import NApp from '@chenyfan/nasdk'
+import WebSocketClientProvider from '@chenyfan/nact-websocket-client'
 
 const hello = new NApp({ id: 'hello' })
+hello.nact.use(new WebSocketClientProvider())
 await hello.start()
 await hello.connect('world', {
-  type: 'tcp',
-  opt: { ip: '127.0.0.1', port: 18900 },
+  type: 'websocket',
+  provider: { url: 'ws://127.0.0.1:18900/nacp' },
 })
 
 const call = hello.request('world', {

@@ -31,12 +31,18 @@ A 和 B 没有直接连接，消息实际经过 Gateway 转发。
 在 NApp 的 `opt` 中设置 `isGateway: true`，并为其他 NApp 提供一个传输入口：
 
 ```js
+import WebSocketServerProvider from '@chenyfan/nact-websocket-server'
+
 const gateway = new NApp({
   id: "gateway",
-  server: [{ type: "ws", opt: { ip: "127.0.0.1", port: 18900 } }],
+  server: [{
+    type: "websocket",
+    provider: { host: "127.0.0.1", port: 18900, path: "/nacp" },
+  }],
   opt: { isGateway: true }, // [!code focus]
 })
 
+gateway.nact.use(new WebSocketServerProvider())
 await gateway.start()
 ```
 
@@ -53,11 +59,15 @@ Gateway 仍然是一个 NApp，也可以拥有自己的 Event、Ability 和订�
 A 和 B 分别启动，然后使用 Gateway 的 App ID 和传输地址建立连接：
 
 ```js
+import WebSocketClientProvider from '@chenyfan/nact-websocket-client'
+
 const gatewayTransport = {
-  type: "ws",
-  opt: { ip: "127.0.0.1", port: 18900 },
+  type: "websocket",
+  provider: { url: "ws://127.0.0.1:18900/nacp" },
 }
 
+appA.nact.use(new WebSocketClientProvider())
+appB.nact.use(new WebSocketClientProvider())
 await appA.start()
 await appB.start()
 

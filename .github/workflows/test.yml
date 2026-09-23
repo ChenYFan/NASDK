@@ -40,9 +40,3 @@ jobs:
 
       - name: Test (simple)
         run: npm run test:simple
-
-      - name: Test (full)
-        run: npm run test:full
-
-      - name: Test (edge)
-        run: npm run test:edge

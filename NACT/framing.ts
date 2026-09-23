@@ -40,7 +40,7 @@ export const MAGIC_BY_VERSION: Record<number, number> = { 0x01: 0xCF }
 
 export const REASSEMBLY_TIMEOUT_MS = 30000             // in-flight msgId not completed in time → drop + error
 
-/** Default LOCAL send-side chunk thresholds. Overridable via TransportSpec.opt.chunkSize. */
+/** Legacy constants retained for framing consumers; Providers own runtime defaults. */
 export const DEFAULT_CHUNK: Record<string, number> = {
   unix: MAX_FRAME_SIZE,
   tcp: 100 * 1024 * 1024,

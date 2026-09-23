@@ -11,6 +11,9 @@
 import NApp from '../../index.ts'
 import { NACEB, PipelineHandler, TaskHandler } from '../../NACEB/index.ts'
 import { NACAB } from '../../NACAB/index.ts'
+import TCPServerProvider from '../../packages/nact-tcp-server/index.ts'
+import UnixServerProvider from '../../packages/nact-unix-server/index.ts'
+import WebSocketServerProvider from '../../packages/nact-websocket-server/index.ts'
 
 const specs = JSON.parse(process.argv[2])          // 要暴露的入口，可以多个
 
@@ -43,6 +46,12 @@ const nacab = new NACAB()
 nacab.register({ name: 'math.add', description: '两数相加', execute: (p) => p.a + p.b })
 
 const app = new NApp({ id: 'core', server: specs })
+const serverProviders = {
+  tcp: () => new TCPServerProvider(),
+  unix: () => new UnixServerProvider(),
+  websocket: () => new WebSocketServerProvider(),
+}
+for (const type of new Set(specs.map(spec => spec.type))) app.nact.use(serverProviders[type]())
 app.bindProcessor('event', naceb.nacpAdaptor)
 app.bindProcessor('ability', nacab.nacpAdaptor)
 await app.start()

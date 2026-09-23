@@ -1,0 +1,6 @@
+{
+  "extends": "./tsconfig.provider.json",
+  "compilerOptions": {
+    "paths": { "@chenyfan/nasdk/NACT": ["./dist/NACT/index.d.ts"] }
+  }
+}

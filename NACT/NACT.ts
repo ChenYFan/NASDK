@@ -1,27 +1,26 @@
-/**
- * NACT — the transport face: flattens ws/tcp/unix into a uniform Peer abstraction ({id, send, close}).
- * Never touches appId, protocol semantics, payload meaning, auth or routing. Browser-safe: carrier code
- * needing node:* lives behind listen.net.ts / listen.ws.ts (dynamic import); browser gets ws-client only,
- * everything else fails loudly (browser-no-server / browser-no-carrier).
- */
+/** NACT core: Provider registration, Peer lifecycle, framing and NACP delivery. */
 
 import type { NACPMessage } from '../NACP/types.ts'
 import type { NApp } from '../NApp/NApp.ts'
-import type { Codec, NACTPeerId, Peer, ServerHandle, TransportSpec } from './types.ts'
+import type {
+  ClientTransportProvider, Codec, NACTPeerId, Peer, ServerHandle, ServerTransportProvider,
+  TransportChannel, TransportProvider, TransportSpec,
+} from './types.ts'
 import { cborCodec } from './codec.ts'
-import { DEFAULT_CHUNK, DEFAULT_HEARTBEAT_MS } from './framing.ts'
 import type { PeerHost } from './peer.ts'
 import { PeerConnectionTable } from './tables.ts'
 import { NACTEvent } from './events.ts'
 import { nactInternal } from './errors.ts'
-
-/** Browser = absence of process.versions.node (a bundled worker has no window but is still a browser). */
-const isBrowser = typeof process === 'undefined' || !(process as any)?.versions?.node
+import { makeChannelPeer } from './channel.ts'
+import { CustomTransportProvider } from './provider.ts'
 
 export class NACT {
   private peerTable = new PeerConnectionTable()
   /** One closer per listen(); carrier-agnostic. */
   private closers: Array<() => Promise<void>> = []
+  private serverProviders = new Map<string, ServerTransportProvider<string, unknown>>()
+  private clientProviders = new Map<string, ClientTransportProvider<string, unknown>>()
+  private customProviders = new Set<string>()
   napp: NApp
   private codec: Codec
   private host: PeerHost
@@ -54,6 +53,28 @@ export class NACT {
   dropPeer(peerId: NACTPeerId): boolean { return this.peerTable.deletePeerbyPeerId(peerId) }
   listPeerId(): NACTPeerId[] { return this.peerTable.listPeerId() }
 
+  use(provider: TransportProvider): void {
+    if (provider.role === 'custom') {
+      if (this.customProviders.has(provider.type))
+        throw nactInternal('provider-already-registered', `custom Provider '${provider.type}' is already registered`)
+      if (!(provider instanceof CustomTransportProvider))
+        throw nactInternal('unsupported-custom-provider', 'custom role is reserved for CustomTransportProvider')
+      provider.attach((channel, chunkSize) => this.acceptChannel(channel, chunkSize).id)
+      this.customProviders.add(provider.type)
+      return
+    }
+
+    if (provider.role === 'server') {
+      if (this.serverProviders.has(provider.type))
+        throw nactInternal('provider-already-registered', `server Provider '${provider.type}' is already registered`)
+      this.serverProviders.set(provider.type, provider as ServerTransportProvider<string, unknown>)
+      return
+    }
+    if (this.clientProviders.has(provider.type))
+      throw nactInternal('provider-already-registered', `client Provider '${provider.type}' is already registered`)
+    this.clientProviders.set(provider.type, provider as ClientTransportProvider<string, unknown>)
+  }
+
   /** Send to a physical connection by peerId; false when there is no such peer. */
   sendToPeer(peerId: NACTPeerId, msg: NACPMessage): boolean {
     const peer = this.peerTable.getPeerbyPeerId(peerId)
@@ -78,54 +99,26 @@ export class NACT {
     })
   }
 
-  private chunkOf(spec: TransportSpec): number {
-    return (spec.opt as any).chunkSize ?? DEFAULT_CHUNK[spec.type]
+  private acceptChannel(channel: TransportChannel, chunkSize: number): Peer {
+    return makeChannelPeer(this.host, channel, chunkSize)
   }
 
-  /** unset → default (ON); `-1` → undefined (= off). */
-  private heartbeatOf(spec: TransportSpec): number | undefined {
-    const ms = (spec.opt as any).heartbeat ?? DEFAULT_HEARTBEAT_MS
-    return ms === -1 ? undefined : ms
+  private providerNotFound(role: 'server' | 'client', type: string): never {
+    throw nactInternal('provider-not-found', `${role} Provider '${type}' is not registered`)
   }
 
-  /** Expose an entry on a carrier; each accepted connection mints a Peer handed to onPeer.
-   *  Throws browser-no-server in a browser for EVERY carrier. */
   async listen(spec: TransportSpec, onPeer: (peer: Peer) => void = () => {}): Promise<ServerHandle> {
-    if (isBrowser)
-      throw nactInternal('browser-no-server',
-        `NACT cannot listen in a browser (asked for '${spec.type}'): a browser has no server capability on any carrier`)
-
-    const chunkSize = this.chunkOf(spec)
-    const heartbeat = this.heartbeatOf(spec)
-
-    if (spec.type === 'unix' || spec.type === 'tcp') {
-      const { listenNet } = await import('./listen.net.ts')
-      const { handle } = await listenNet(this.host, spec, chunkSize, heartbeat, onPeer)
-      this.closers.push(handle.close)
-      return handle
-    }
-
-    const { listenWs } = await import('./listen.ws.ts')
-    const { handle } = await listenWs(this.host, spec, chunkSize, heartbeat, onPeer)
+    const provider = this.serverProviders.get(spec.type) ?? this.providerNotFound('server', spec.type)
+    const chunkSize = spec.nact?.chunkSize ?? provider.defaultChunkSize
+    const handle = await provider.listen(spec.provider, (channel) => onPeer(this.acceptChannel(channel, chunkSize)))
     this.closers.push(handle.close)
     return handle
   }
 
-  /** Dial out; the register handshake is the caller's business. tcp/unix throw browser-no-carrier in a browser. */
   async dial(spec: TransportSpec): Promise<Peer> {
-    const chunkSize = this.chunkOf(spec)
-    const heartbeat = this.heartbeatOf(spec)
-
-    if (spec.type === 'unix' || spec.type === 'tcp') {
-      if (isBrowser)
-        throw nactInternal('browser-no-carrier',
-          `NACT cannot dial '${spec.type}' in a browser: no raw-socket API exists — use { type: 'ws' }`)
-      const { dialNet } = await import('./listen.net.ts')
-      return dialNet(this.host, spec, chunkSize, heartbeat)
-    }
-
-    const { dialWs } = await import('./listen.ws.ts')
-    return dialWs(this.host, spec, chunkSize, heartbeat)
+    const provider = this.clientProviders.get(spec.type) ?? this.providerNotFound('client', spec.type)
+    const channel = await provider.dial(spec.provider)
+    return this.acceptChannel(channel, spec.nact?.chunkSize ?? provider.defaultChunkSize)
   }
 
   /** Drop every connection and server entry. */

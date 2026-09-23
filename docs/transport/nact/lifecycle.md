@@ -2,7 +2,7 @@
 
 NACT 生命周期分为`监听入口生命周期`与`Peer 生命周期`。
 
-监听入口负责接收新连接，Peer 负责持有一条物理连接。NACT 不维护 App ID，也没有 NACP 的重连宽限状态。
+监听入口由 Server Provider 创建并接收新连接，Peer 持有 Provider 交付的双向 Channel。NACT 不维护 App ID，也没有 NACP 的重连宽限状态。
 
 ## 监听入口生命周期
 
@@ -14,7 +14,7 @@ stateDiagram-v2
     closed --> [*]
 ```
 
-`listen(spec)` 将监听指定端口/路径，创建一个 WebSocket、TCP 或 Unix Socket Server，并返回对应的 `ServerHandle`：
+`listen(spec)` 根据 `role=server + spec.type` 查找 Provider，由 Provider 创建监听服务，并返回对应的 `ServerHandle`：
 
 ```ts
 interface ServerHandle {
@@ -42,7 +42,7 @@ stateDiagram-v2
 
 ### 建立
 
-主动 `dial()` 成功或监听入口接收连接后，NACT 创建统一的 `Peer`，分配 `peerId` 并写入 `peerTable`，随后宣告`nact:peer:connect`事件。
+Client Provider 的 `dial()` 成功、Server Provider 接受连接，或 Custom Provider `open()` 后，NACT 从相同的 Channel 创建 `Peer`，分配 `peerId` 并写入 `peerTable`，随后宣告 `nact:peer:connect` 事件。
 
 `dial()` 返回时 Peer 已经入表，可以立即用于 [`sendToPeer()`](/transport/nact/inbound-outbound#出站)。
 
@@ -59,7 +59,7 @@ Peer 可能因以下原因离开：
 - Framing 或 CBOR 解码失败后被 NACT 关闭。
 - NApp 终止。
 
-除关闭物理连接外外，Peer 还会统一执行`peerTable.delete(peerId)`，并宣告`nact:peer:disconnect`。
+除关闭物理连接外，Peer 还会统一执行`peerTable.delete(peerId)`，并宣告`nact:peer:disconnect`。
 
 ## 与 NACP 的衔接
 

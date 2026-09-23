@@ -1,98 +1,169 @@
 # 底层传输
 
-NACT 支持 WebSocket、TCP 和 Unix Socket 三种底层传输，并将其统一为 `NACT Peer`。
-
-| 传输   | 适用场景                      | 地址                    |
-| ------ | ----------------------------- | ----------------------- |
-| `unix` | 同一台机器上的 Node.js 进程   | `socketPath`            |
-| `tcp`  | 不需要 WebSocket 的跨机器通信 | `ip` + `port`           |
-| `ws`   | 浏览器接入或CDN中继           | `ip` + `port` + `path?` |
-
-## 如何选择
-
-- 同机通信优先使用 Unix Socket。
-- 跨机器、两端都是 Node.js 时使用 TCP。
-- 任意一端是浏览器时使用 WebSocket。
-- 需要经过 WebSocket 代理或网关时使用 WebSocket。
-
-三种传输只影响连接方式，不改变 [NACT Framing](/transport/nact/framing)、NACPMessage 或上层协议语义。
-
-## TransportSpec
-
-```ts
-type TransportSpec =
-  | { type: "ws"; opt: WSOpt }
-  | { type: "tcp"; opt: TCPOpt }
-  | { type: "unix"; opt: UnixOpt }
-
-interface WSOpt extends ServerOptBase {
-  ip: string
-  port: number
-  path?: string
-}
-
-interface TCPOpt extends ServerOptBase {
-  ip: string
-  port: number
-}
-
-interface UnixOpt extends ServerOptBase {
-  socketPath: string
-}
-```
-
-同一个 `TransportSpec` 可用于监听和拨号：
-
-```ts
-await nact.listen(spec)
-const peer = await nact.dial(spec)
-```
-
-:::warning
-截止**NASDK v1.0.3** `listen()` 由 NACT 创建并持有对应 Server，暂时不能复用外部已有的 WebSocket Server。
-:::
-
-## 通用选项
-
-```ts
-interface ServerOptBase {
-  heartbeat?: number
-  chunkSize?: number
-  compression?: "none" | "cbor-records"
-}
-```
-
-| 选项          | 说明                                     |
-| ------------- | ---------------------------------------- |
-| `heartbeat`   | 心跳间隔，默认 30 秒；`-1` 关闭          |
-| `chunkSize`   | 本端发送时的分片阈值                     |
-| `compression` | 预留的 CBOR 编码选项，当前 NACT 尚未读取 |
-
-默认 `chunkSize`：
-
-| 传输   | 默认值  |
-| ------ | ------- |
-| `unix` | 2 GiB   |
-| `tcp`  | 100 MiB |
-| `ws`   | 100 MiB |
-
-分片行为见 [NACT Framing](/transport/nact/framing)，连接与心跳行为见[生命周期](/transport/nact/lifecycle)。
-
-## 浏览器
-
-浏览器只能使用 WebSocket 主动拨号连接到其他NApp：
-
-```ts
-await nact.dial({
-  type: "ws",
-  opt: { ip: "127.0.0.1", port: 46080, path: "/nacp" },
-})
-```
-
-浏览器调用 `listen()` 会抛出 `browser-no-server`，拨号 TCP 或 Unix Socket 会抛出 `browser-no-carrier`。
+NACT 本身不包含任何物理传输实现，所有物理连接都通过 Transport Provider 接入。
 
 :::tip
-浏览器只能作为WebSocket Client连接到其他NApp，但这并不影响NACP上层能力。
+实际开发时，应用只需安装实际使用的传输包。
 
-换句话说只要连接成功了，浏览器前端也可以作为完整NApp处理事件。
+无论选择哪一种，上层 NACP 的用法完全一致。
+:::
+
+```mermaid
+flowchart TD
+    S[Server Provider<br/>监听并接受连接] -->|Peer| T[NACT]
+    C[Client Provider<br/>主动发起连接] -->|Peer| T
+    T <--> P[NACP]
+```
+
+## 官方 Provider
+
+| 包 | 角色 | 建连方式 | 推荐运行时 |
+| --- | --- | --- | --- |
+| `@chenyfan/nact-websocket-server` | Server | 建立 WebSocket Server 并接受连接 | Node.js 或其他允许监听的运行时 |
+| `@chenyfan/nact-websocket-client` | Client | 主动连接 WebSocket Server | Web、Node.js、Worker |
+| `@chenyfan/nact-tcp-server` | Server | 建立 TCP Server | Node.js |
+| `@chenyfan/nact-tcp-client` | Client | 主动连接 TCP Server | Node.js |
+| `@chenyfan/nact-unix-server` | Server | 建立 Unix Socket Server | Node.js/POSIX |
+| `@chenyfan/nact-unix-client` | Client | 主动连接 Unix Socket Server | Node.js/POSIX |
+| `@chenyfan/nact-streamable-http-server` | Server | 建立 HTTP Server 并通过HTTPStream和POST流式下载和上传消息 | Node.js 或其他允许监听的运行时 |
+| `@chenyfan/nact-streamable-http-client` | Client | 使用fetch Stream和POST | Web、Node.js、Worker、etc. |
+
+:::info
+**（NASDK v1.0.4）** 物理传输Provider拆分为独立包。
+
+v1.0.3 及更早版本在主包内置 WebSocket、TCP 与 Unix Socket。
+
+Server 与 Client 包在建立后两端均为完整的双向通道，C/S只表示物理信道上谁是链接主动方。
+:::
+
+## Server Provider
+
+Server 端只需安装 Server 包，并在 `start()` 前注册：
+
+```bash
+npm install @chenyfan/nasdk @chenyfan/nact-websocket-server
+```
+
+```ts
+import NApp from '@chenyfan/nasdk'
+import WebSocketServerProvider, {
+  type WebSocketServerTransportSpec,
+} from '@chenyfan/nact-websocket-server'
+
+const server: WebSocketServerTransportSpec = {
+  type: 'websocket',
+  provider: { host: '127.0.0.1', port: 18900, path: '/nacp' },
+}
+
+const app = new NApp({
+  id: 'server',
+  server: [server],
+})
+
+app.nact.use(new WebSocketServerProvider())
+await app.start()
+```
+
+## Client Provider
+
+Client 端只需安装 Client 包：
+
+```bash
+npm install @chenyfan/nasdk @chenyfan/nact-websocket-client
+```
+
+```ts
+import NApp from '@chenyfan/nasdk'
+import WebSocketClientProvider, {
+  type WebSocketClientTransportSpec,
+} from '@chenyfan/nact-websocket-client'
+
+const app = new NApp({ id: 'client' })
+
+app.nact.use(new WebSocketClientProvider())
+await app.start()
+const target: WebSocketClientTransportSpec = {
+  type: 'websocket',
+  provider: { url: 'wss://example.com/nacp' },
+}
+await app.connect('server', target)
+```
+
+:::tip
+同一个 NApp 可以同时监听和主动连接，分别注册两个包即可：
+
+```ts
+app.nact.use(new WebSocketServerProvider())
+app.nact.use(new WebSocketClientProvider())
+```
+
+没有注册对应传输时，`start()` 或 `connect()` 会宣告 `provider-not-found` 失败。
+:::
+
+
+:::details
+
+## 连接配置
+
+
+`TransportSpec` 把物理连接参数和 NACT 参数分开。NACT 根据 `type` 查找 Provider，将 `provider` 原样交给它，自己只读取 `nact`：
+
+```ts
+interface TransportSpec<TType extends string = string, TProvider = unknown> {
+  type: TType
+  provider: TProvider
+  nact?: {
+    chunkSize?: number
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `type` | 查找对应 Provider，由传输包定义 |
+| `provider` | 物理连接参数，原样交给对应 Provider |
+| `nact.chunkSize` | 本地发送侧的分片阈值；省略时使用 Provider 默认值 |
+
+每个传输包默认导出用于注册的Provider，并通过命名导出该包自己的完整Transport Spec和Provider配置类型。具体`type`及`provider`形状由子包定义，不由NASDK主包集中定义：
+
+```ts
+import WebSocketClientProvider, {
+  type WebSocketClientOptions,
+  type WebSocketClientTransportSpec,
+} from '@chenyfan/nact-websocket-client'
+```
+
+`WebSocketClientTransportSpec`用于完整的`connect()`配置，`WebSocketClientOptions`只对应其中的`provider`字段。TCP、Unix Socket以及其他独立Provider分别从自己的包导出对应类型。
+
+
+## Streamable HTTP
+
+Streamable HTTP 把一条逻辑双向连接映射到两个 HTTP 方向：
+
+- Server 到 Client：一个持续的二进制 HTTP Response。
+- Client 到 Server：一个或多个二进制 HTTP POST Request。
+- Provider 使用 session id 将两个方向绑定为同一个 Peer。
+
+两个方向都使用 `Content-Type: application/octet-stream`，直接传输 NACT 产生的二进制数据。
+
+```mermaid
+sequenceDiagram
+    participant C as Client Provider
+    participant S as Server Provider
+
+    C->>S: 建立二进制 Stream
+    S-->>C: application/octet-stream
+    C->>S: POST application/octet-stream
+```
+
+Provider 不使用 SSE、Base64 或 JSON 转换。CBOR payload 与 NACT Frame 可以包含任意二进制内容，并在 HTTP Stream 中保持原样。
+
+Server 包拥有并启动 HTTP Server，Client 包主动发起 Stream 与 POST。
+
+## Custom Provider
+
+如果应用已经拥有 HTTP/WebSocket Server，或平台只向函数交付 Request，不要使用 Server Provider 接管宿主，改用 Custom Provider 接入已有连接。
+
+详见[自定义传输Provider](/transport/nact/provider)。
+
 :::

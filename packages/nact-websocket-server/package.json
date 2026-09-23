@@ -1,0 +1,14 @@
+{
+  "name": "@chenyfan/nact-websocket-server",
+  "version": "1.0.4",
+  "type": "module",
+  "files": ["dist/index.js", "dist/index.js.map", "dist/index.d.ts", "dist/index.d.ts.map"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": { "build": "tsc -p tsconfig.build.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "dependencies": { "ws": "8.21.3" },
+  "devDependencies": { "@types/ws": "8.18.1" },
+  "peerDependencies": { "@chenyfan/nasdk": ">=1.0.4" },
+  "peerDependenciesMeta": { "@chenyfan/nasdk": { "optional": true } }
+}

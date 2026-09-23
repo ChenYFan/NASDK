@@ -15,9 +15,17 @@ import { fork } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
 import NApp from '../../index.ts'
+import TCPClientProvider from '../../packages/nact-tcp-client/index.ts'
+import UnixClientProvider from '../../packages/nact-unix-client/index.ts'
+import WebSocketClientProvider from '../../packages/nact-websocket-client/index.ts'
 
 const SERVER = fileURLToPath(new URL('./_server.mjs', import.meta.url))
 const PORT = 18900
+const clientProviders = {
+  tcp: () => new TCPClientProvider(),
+  unix: () => new UnixClientProvider(),
+  websocket: () => new WebSocketClientProvider(),
+}
 
 /** 起服务端子进程，等它 ready。返回子进程句柄 + 一个 ask()（请它做事并等回话）。 */
 async function startServer(specs) {
@@ -42,15 +50,17 @@ async function startServer(specs) {
 }
 
 test('simple/napp：一次完整往返', async (t) => {
-  const spec = { type: 'tcp', opt: { ip: '127.0.0.1', port: PORT } }
-  const server = await startServer([spec])
+  const serverSpec = { type: 'tcp', provider: { host: '127.0.0.1', port: PORT } }
+  const clientSpec = { type: 'tcp', provider: { host: '127.0.0.1', port: PORT } }
+  const server = await startServer([serverSpec])
 
   // 客户端不写 server[]，但同样要 start()
   const client = new NApp({ id: 'web' })
+  client.nact.use(new TCPClientProvider())
   await client.start()
 
   await t.test('connect 建立双向连接', async () => {
-    await client.connect('core', spec)
+    await client.connect('core', clientSpec)
     assert.deepEqual(client.listConnectedApp(), ['core'])
     assert.deepEqual((await server.ask('peers')).peers, ['web'])
   })
@@ -97,7 +107,7 @@ test('simple/napp：一次完整往返', async (t) => {
   await t.test('disconnect 只断一个对端，App 还活着，还能连回来', async () => {
     assert.equal(await client.disconnect('core'), true)
     assert.deepEqual(client.listConnectedApp(), [])
-    await client.connect('core', spec)
+    await client.connect('core', clientSpec)
     assert.deepEqual(client.listConnectedApp(), ['core'])
   })
 
@@ -106,18 +116,28 @@ test('simple/napp：一次完整往返', async (t) => {
 })
 
 test('simple/napp：一个 App 同开三种 carrier，调用写法完全一样', async (t) => {
-  const specs = [
-    { type: 'tcp', opt: { ip: '127.0.0.1', port: PORT + 1 } },
-    { type: 'ws', opt: { ip: '127.0.0.1', port: PORT + 2, path: '/ws' } },
-    { type: 'unix', opt: { socketPath: `/tmp/nasdk-simple-${process.pid}.sock` } },
+  const entries = [
+    {
+      server: { type: 'tcp', provider: { host: '127.0.0.1', port: PORT + 1 } },
+      client: { type: 'tcp', provider: { host: '127.0.0.1', port: PORT + 1 } },
+    },
+    {
+      server: { type: 'websocket', provider: { host: '127.0.0.1', port: PORT + 2, path: '/ws' } },
+      client: { type: 'websocket', provider: { url: `ws://127.0.0.1:${PORT + 2}/ws` } },
+    },
+    {
+      server: { type: 'unix', provider: { path: `/tmp/nasdk-simple-${process.pid}.sock` } },
+      client: { type: 'unix', provider: { path: `/tmp/nasdk-simple-${process.pid}.sock` } },
+    },
   ]
-  const server = await startServer(specs)
+  const server = await startServer(entries.map(entry => entry.server))
 
-  for (const spec of specs) {
-    await t.test(spec.type, async () => {
-      const cli = new NApp({ id: `cli-${spec.type}` })
+  for (const entry of entries) {
+    await t.test(entry.client.type, async () => {
+      const cli = new NApp({ id: `cli-${entry.client.type}` })
+      cli.nact.use(clientProviders[entry.client.type]())
       await cli.start()
-      await cli.connect('core', spec)          // 只有这一行随 carrier 变
+      await cli.connect('core', entry.client)
       const res = await cli.request('core', { kind: 'ability', target: 'math.add', payload: { a: 1, b: 2 } }).response
       assert.equal(res.payload, 3)
       await cli.terminate()

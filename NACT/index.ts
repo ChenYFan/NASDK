@@ -5,9 +5,12 @@
 
 export { NACT } from './NACT.ts'
 export { cborCodec } from './codec.ts'
+export { CustomTransportProvider } from './provider.ts'
+export type { CustomTransportSpec } from './provider.ts'
 
 export type {
-  Transport, TransportSpec, WSOpt, TCPOpt, UnixOpt, ServerOptBase, HeartbeatMs, CompressionKind,
+  TransportSpec, TransportRole, TransportProvider, ServerTransportProvider, ClientTransportProvider,
+  TransportChannel, CustomTransportSink, CustomTransportEndpoint,
   NACTPeerId, Peer, Codec, ServerHandle,
 } from './types.ts'
 
