@@ -48,7 +48,7 @@ await app.start() // [!code focus]
 `connect()` 建立到一个 NApp 的连接，并完成握手。
 
 ```js
-import WebSocketClientProvider from '@chenyfan/nact-websocket-client'
+import WebSocketClientProvider from '@nyirusu/nact-websocket-client'
 
 app.nact.use(new WebSocketClientProvider())
 await app.connect("core", {

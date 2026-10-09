@@ -1,19 +1,15 @@
-/**
- * simple/naceb — 事件处理机：写 Task、写 Pipeline、跑一次、看过程流。
- *
- * 不走网络。NACEB 是「有状态、多步骤、会抢资源」的那一半（另一半是 NACAB）。
- */
+// simple/naceb: NACEB, the stateful multi-step half of event processing.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { NACEB, PipelineHandler, TaskHandler } from '../../NACEB/index.ts'
 
-// ── Task：干活的一步。this 是 TaskInstance，输入取 this.input ──
+// ── Task: this is TaskInstance, input comes from this.input ──
 class Double extends TaskHandler {
   name = 'double'
   description = '翻倍，并上报一次过程'
   async execute() {
-    this.processingResultReport({ got: this.input })   // 显式上报才有过程流
+    this.processingResultReport({ got: this.input })   // process stream requires explicit report
     return this.input * 2
   }
 }
@@ -24,16 +20,16 @@ class Boom extends TaskHandler {
   async execute() { throw new Error('炸了') }
 }
 
-// ── Pipeline：只决定下一步跑什么，自己不干活 ──
+// ── Pipeline: only decides the next step, does no work itself ──
 class DoubleTwice extends PipelineHandler {
   name = 'doubleTwice'
   description = '翻倍两次'
   next(lastResult) {
-    if (lastResult === undefined) {                    // 首步：从 event 的 payload 取输入
+    if (lastResult === undefined) {                    // first step: input from event payload
       this.state.steps = 0
       return { task: 'double', input: this.event.payload.n }
     }
-    this.state.steps++                                 // state 跨步保留
+    this.state.steps++                                 // state persists across steps
     if (this.state.steps >= 2) return { task: '$terminal', input: { value: lastResult, steps: this.state.steps } }
     return { task: 'double', input: lastResult }
   }
@@ -52,7 +48,7 @@ function build() {
   return new NACEB({
     pipelineHandlers: [new DoubleTwice(), new WillFail()],
     taskHandlers: [new Double(), new Boom()],
-    // 对外只暴露 eventAlias 里的名字，pipeline 内部名不外泄
+    // only eventAlias names are exposed; pipeline names stay internal
     eventAlias: [
       { eventName: 'calc', pipelineName: 'doubleTwice', description: '翻倍两次' },
       { eventName: 'willFail', pipelineName: 'willFail', description: '注定失败' },
@@ -120,7 +116,7 @@ test('T 事件：状态迁移可观测，naceb:{层}:{态}:{前后}:{id}', async
     )
   })
 
-  // 两个 task 各跑一轮，每轮至少经过 running 和 done
+  // each task run passes at least running and done
   assert.ok(seen.includes('running'), `看到 running：${seen.join(',')}`)
   assert.ok(seen.includes('done'), `看到 done：${seen.join(',')}`)
 })
@@ -143,7 +139,7 @@ test('runtime 事件：message 级就是过程流', async () => {
 })
 
 test('busyKeys：声明占用同一把 key 的 task 不会并发', async () => {
-  // 这是 NACEB 存在的主要理由：GPU 这类独占资源，靠声明而不是靠调用方自己加锁
+  // NACEB exists mainly for this: exclusive resources like GPU via declaration, not caller-side locks
   class Gpu extends TaskHandler {
     name = 'gpu'
     description = '占 GPU'
@@ -168,7 +164,6 @@ test('busyKeys：声明占用同一把 key 的 task 不会并发', async () => {
     eventAlias: [{ eventName: 'useGpu', pipelineName: 'one', description: '用一次 GPU' }],
   })
 
-  // 同时丢三个进去
   await Promise.all([1, 2, 3].map((i) => new Promise((resolve) => {
     naceb.nacpAdaptor.push(
       { target: 'useGpu', payload: {}, reqId: `g${i}` },

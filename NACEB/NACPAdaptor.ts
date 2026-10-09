@@ -1,21 +1,14 @@
-/**
- * NACEB → NACP adaptor. Satisfies the NASDK `Processor` contract so NACP can bind it without knowing NACEB.
- * Drives NACEB via its public surface only. Uses the idle window (NOT bypassIdle): push → attach hooks/listen
- * → start, so hooks are in place before the first transition.
- *
- * Two-layer id isolation: NACP gives only reqId; the NACEB eventId never leaks back to NACP.
- */
+// Uses the idle window (NOT bypassIdle): push → attach hooks → start, so hooks exist before
+// the first transition. NACEB eventId never leaks back to NACP.
 
 import type { EventProcessor, ProcessorSignalSpec, ProcessorSpec, ProcessorHooks } from '../types.ts'
 import { errorDetail } from '../types.ts'
 import type { ReadonlyBus } from '../EventBus.ts'
 import type { NACEB } from './NACEB.ts'
 
-/**
- * `whyNotOk` is a PROTOCOL field read by the peer — it states only what any Processor could say. NACEB's own
- * vocabulary and machine codes ride the response PAYLOAD (opaque to NACP), never whyNotOk.
- */
-const REJECTED = 'processor-rejected'   // push refused the call outright (nothing started)
+// `whyNotOk` is a protocol field read by the peer: it states only what any Processor could
+// say. NACEB's own vocabulary rides the response payload, never whyNotOk.
+const REJECTED = 'processor-rejected'   // push refused the call outright
 const FAILED   = 'processor-failed'     // the call ran and ended in failure
 
 export class NACPAdaptor implements EventProcessor {
@@ -26,20 +19,18 @@ export class NACPAdaptor implements EventProcessor {
 
   list() { return this.naceb.listEventAlias() }
 
-  /** push (idle) → listen process → attach terminal hooks → start. Returns the eventId (NACP won't take it). */
+  // Push (idle) → listen → attach terminal hooks → start.
   push(spec: ProcessorSpec, hooks: ProcessorHooks): string {
     let eventId: string
     try {
-      // eventName = target; stops in idle (no bypassIdle).
       eventId = this.naceb.pushEvent({ name: spec.target, payload: spec.payload })
     } catch (err: any) {
-      // Push-time rejection → terminal failure; raw reason handed down the payload.
       hooks.onResponse({ error: errorDetail(err) }, false, REJECTED)
       return ''
     }
     const processKey = `naceb:runtime:message:${eventId}`
     const processSub = this.obs.listen(processKey, (m: any) => hooks.onProcess(m?.opt?.chunk))
-    // Terminal hooks attached BEFORE start so the done/failure signal can't be missed.
+    // Terminal hooks must be attached BEFORE start so done/failure can't be missed.
     const ev = this.naceb.getEvent(eventId)!
     ev.afterTDone(() => {
       this.reqEvents.delete(spec.reqId)
@@ -49,7 +40,6 @@ export class NACPAdaptor implements EventProcessor {
     ev.afterTFailure(() => {
       this.reqEvents.delete(spec.reqId)
       this.obs.off(processSub)
-      // The final object goes through untouched as payload detail.
       hooks.onResponse(this.naceb.consumeEvent(eventId), false, FAILED)
     })
     this.reqEvents.set(spec.reqId, eventId)

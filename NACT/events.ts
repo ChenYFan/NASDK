@@ -1,11 +1,4 @@
-/**
- * NACT event names + payload types, on the shared NApp bus.
- *
- *   nact:peer:{action}   — physical connect / disconnect / error   payload { peerId } (+ reason on error)
- *
- * Physical connect ≠ logical online (register handshake not yet run). ERROR IS FOLLOWED BY DISCONNECT:
- * `error` says why, `disconnect` says gone — disconnect is the ONLY trigger for NACP cleanup.
- */
+// Physical connect ≠ logical online; disconnect, not error, is the only NACP cleanup trigger.
 
 import type { NACTPeerId } from './types.ts'
 
@@ -15,13 +8,11 @@ export const NACTEvent = {
   peerError:      'nact:peer:error',
 } as const
 
-/** Reasons in nact:peer:error's payload (open set, never spliced into the event name). */
 export type PeerErrorReason =
-  | 'frame-too-large' | 'frame-too-small' | 'decode-failed'
-  | 'reassembly-timeout' | 'fragment-out-of-bounds' | 'overlapping-fragment'
-  | 'heartbeat-timeout'   // a ping's pong was still outstanding when the next ping came due (ws only; tcp/unix rely on OS keepalive)
-  | 'framer-error'
-  | (string & {})   // open set
+  | 'frame-too-small' | 'frame-too-large' | 'frame-size-mismatch' | 'version-mismatch' | 'bad-magic'
+  | 'frame-out-of-bounds' | 'overlapping-frame' | 'reassembly-timeout' | 'decode-failed'
+  | 'transport-error'
+  | (string & {})
 
 export interface PeerPayload      { peerId: NACTPeerId }
 export interface PeerErrorPayload { peerId: NACTPeerId; reason: PeerErrorReason }

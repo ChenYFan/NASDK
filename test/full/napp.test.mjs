@@ -1,9 +1,4 @@
-/**
- * full/napp — 联测。真进程、真 socket，覆盖门面正常会走到的路径。
- *
- * 各层单测在 full/{nacp,nact,naceb,nacab,eventbus}；这个文件只测「装起来之后端到端是否成立」。
- * 对端跑在 ./_peer.mjs 的独立进程里。
- */
+// End-to-end with real processes and sockets.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -13,13 +8,13 @@ import { fileURLToPath } from 'node:url'
 import NApp from '../../index.ts'
 import { NACEB } from '../../NACEB/index.ts'
 import { NACAB } from '../../NACAB/index.ts'
-import { PORT, tcp, ws, unix, sock, startApp, makeNaceb, makeNacab, collect, sleep } from '../_kit.mjs'
+import { PORT, tcp, ws, unix, sock, startApp, useProviders, makeNaceb, makeNacab, collect, sleep } from '../_kit.mjs'
 
-const PEER = fileURLToPath(new URL('./_peer.mjs', import.meta.url))
+const PEER = fileURLToPath(new URL('../_kit.mjs', import.meta.url))
 
-/** 起一个对端进程。返回 ask()（发命令等回话）和 stop()。 */
+/** Spawn a peer process; returns ask() (send command, await reply) and stop(). */
 async function spawnPeer(cfg) {
-  const child = fork(PEER, [JSON.stringify(cfg)], {
+  const child = fork(PEER, ['--test-peer', 'full', JSON.stringify(cfg)], {
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   })
   await new Promise((resolve, reject) => {
@@ -45,7 +40,7 @@ async function spawnPeer(cfg) {
   }
 }
 
-// ── 装配 ──
+// ── assembly ──
 
 test('两个 kind 都不绑也能 start —— 自动兜默认 Processor', async () => {
   const app = new NApp({ id: 'bare' })
@@ -86,7 +81,7 @@ test('绑一个自制 Processor 也行 —— NACP 只认契约', async () => {
     push: (spec, hooks) => { calls.push(spec.target); hooks.onResponse({ from: 'custom' }, true) },
     register: (item) => calls.push(`register:${item.name}`),
   }
-  const app = new NApp({ id: 'c', server: [tcp(PORT.nappC)] })
+  const app = useProviders(new NApp({ id: 'c', server: [tcp(PORT.nappC)] }))
   app.bindProcessor('ability', custom)
   await app.start()
 
@@ -123,10 +118,10 @@ test('没有 id 直接抛', () => {
   assert.throws(() => new NApp({ id: '' }), (e) => e.code === 'no-id')
 })
 
-// ── 生命周期 ──
+// ── lifecycle ──
 
 test('start 幂等，重复调不重复监听', async () => {
-  const app = new NApp({ id: 'idem', server: [tcp(PORT.napp)] })
+  const app = useProviders(new NApp({ id: 'idem', server: [tcp(PORT.napp)] }))
   await app.start()
   await app.start()
   await app.start()
@@ -141,9 +136,8 @@ test('connect 前必须 start', async () => {
 })
 
 test('connect 的 expect 填错 → register-failed（要等满 10s 超时）', async () => {
-  // 对端看到 to≠self 会静默丢弃 register，不回话 —— 所以 dialler 只能等自己的 10s 超时。
-  // 这是刻意设计（NACP.onRegister 的注释：「你拨错了 App」就是靠超时浮现），不是 bug，
-  // 代价是这条测试必然慢。它是唯一一条慢的，所以留着而不是拿 mock 绕过去。
+  // Peer silently drops register when to≠self, so the dialler can only hit its 10s timeout.
+  // Deliberate design; this is the only slow test and stays real rather than mocked.
   const peer = await spawnPeer({ id: 'realname', server: [tcp(PORT.napp)] })
   const app = await startApp('dialer')
 
@@ -207,11 +201,11 @@ test('disconnect 只断一个，其他链路不受影响，还能连回来', asy
   assert.deepEqual((await a.ask('peers')).peers, [], 'A 那边也清了')
   assert.deepEqual((await b.ask('peers')).peers, ['me'], 'B 那边还在')
 
-  // B 仍然能用
+  // B still works
   const res = await me.app.request('B', { kind: 'ability', target: 'add', payload: { a: 1, b: 1 } }).response
   assert.equal(res.payload, 2)
 
-  // A 能重连
+  // A can reconnect
   await me.app.connect('A', tcp(PORT.napp))
   assert.deepEqual(me.app.listConnectedApp().sort(), ['A', 'B'])
 
@@ -242,7 +236,7 @@ test('对端死掉时在途请求在重连宽限到期后失败', async () => {
   const app = await startApp('waiter', { opt: { reconnectGraceMs: 50 } })
   await app.app.connect('dying2', tcp(PORT.nappC))
 
-  // hang 事件永不返回；杀掉对端应该让它 reject
+  // 'hang' never returns; killing the peer should reject it
   const pending = app.app.request('dying2', { kind: 'event', target: 'run', payload: { task: 'hang' } }).response
   await sleep(80)
   peer.child.kill('SIGKILL')
@@ -254,7 +248,7 @@ test('对端死掉时在途请求在重连宽限到期后失败', async () => {
   await app.stop()
 })
 
-// ── 请求 ──
+// ── requests ──
 
 test('ability 与 event 端到端，含过程流', async () => {
   const peer = await spawnPeer({ id: 'srv', server: [tcp(PORT.napp)] })
@@ -379,7 +373,7 @@ test('二进制 payload 原样往返（CBOR 字节串，不转 base64）', async
   await app.stop(); await peer.stop()
 })
 
-// ── 订阅 ──
+// ── subscriptions ──
 
 test('subscribe：统一句柄、流、退订 id', async () => {
   const peer = await spawnPeer({ id: 'srv', server: [tcp(PORT.napp)] })
@@ -450,7 +444,7 @@ test('break 是主动退订：对端订阅表清零，回调也停', async () =>
   assert.equal((await peer.ask('subcount')).subs, 1, '对端记了一条')
 
   await peer.emit('brk:a', { n: 1 })
-  for await (const c of stream) { break }           // 拿到第一条就走
+  for await (const c of stream) { break }           // take the first message, then stop
 
   await sleep(120)
   assert.equal((await peer.ask('subcount')).subs, 0, 'break 发了真 unsubscribe')
@@ -514,7 +508,7 @@ test('对端断开并超过重连宽限后，流结束且 for await 自然退出
   await app.stop()
 })
 
-// ── 多 carrier / 组网 ──
+// ── multi-carrier / topology ──
 
 test('一个 App 同开三种入口，三种都能连', async () => {
   const specs = [tcp(PORT.napp), ws(PORT.nappB), unix('napp-full')]
@@ -549,17 +543,17 @@ test('一个 App 连多个对端，互不干扰', async () => {
 })
 
 test('Gateway 转发：A 经 Gateway 打到 B', async () => {
-  // gw 是 Gateway；A 和 B 都连它，然后 A 直接向 B 发请求
+  // gw is a Gateway; A and B both connect to it, then A requests B directly
   const gw = await spawnPeer({ id: 'gw', server: [tcp(PORT.nappGw)], opt: { isGateway: true } })
   const b = await spawnPeer({ id: 'B', server: [tcp(PORT.nappGw2)] })
 
-  // B 主动连到 gw，让 gw 认识 B
+  // B dials gw itself so gw knows B
   assert.equal((await b.ask('connect', { expect: 'gw', spec: tcp(PORT.nappGw) })).ok, true)
 
   const a = await startApp('A')
   await a.app.connect('gw', tcp(PORT.nappGw))
 
-  // A 只连了 gw，没连 B —— 出站找不到 B 的路由就兜到 Gateway
+  // A only connected to gw: no route to B, falls back to the Gateway
   const res = await a.app.request('B', { kind: 'ability', target: 'add', payload: { a: 3, b: 4 } }).response
   assert.equal(res.payload, 7, '经 Gateway 转发到了 B')
 
@@ -571,14 +565,14 @@ test('Gateway 声明是对端说的，本地无从指定', async () => {
   const app = await startApp('client')
   await app.app.connect('gw', tcp(PORT.nappGw))
 
-  // 从 register 应答里学到对端是 Gateway，槽位被采纳
+  // gateway-ness learned from the register reply; there is no local option
   assert.ok(app.app.nacp.getGatewayPeerId(), '本地记住了 Gateway 槽位')
   assert.equal(app.app.isGateway, false, '自己不是 Gateway')
 
   await app.stop(); await gw.stop()
 })
 
-// ── 观测 ──
+// ── observability ──
 
 test('nacp / nact 事件都汇到同一个 app.bus', async () => {
   const peer = await spawnPeer({ id: 'srv', server: [tcp(PORT.napp)] })
@@ -617,7 +611,7 @@ test('listConnectedApp 反映当前连接', async () => {
   await app.stop(); await peer.stop()
 })
 
-// ── notify / response 手动口 ──
+// ── notify / response manual API ──
 
 test('notify 到没订阅的对端返 true（发出去了），到陌生人返 false', async () => {
   const peer = await spawnPeer({ id: 'srv', server: [tcp(PORT.napp)] })

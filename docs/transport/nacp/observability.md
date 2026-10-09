@@ -77,7 +77,7 @@ interface OutboundPayload {
 | 目标离线，消息进入 Backlog                                       | 否；重连后真正尝试出线时才产生                           |
 | 未知目标且没有 [Gateway](/napp/advanced/gateway)                 | 是，`toPeerId` 为 `undefined`，随后报告 `no-route`       |
 | 消息发给自己                                                     | 是，`toPeerId` 为 `undefined`，随后报告 `self-addressed` |
-| Gateway 转发                                                     | 是，同时产生 `nacp:internal:gateway:success`             |
+| Gateway 转发                                                     | 是，Provider 接纳后产生 `nacp:internal:gateway:success`  |
 | [AutoSubscribe](/transport/nacp/auto-subscribe) 的虚拟订阅与退订 | 否                                                       |
 
 同一条可靠消息在断线重发时可能多次产生 `nacp:outbound:{type}`，需要按 `msg.id` 关联这些尝试。
@@ -149,7 +149,7 @@ interface NappSuccessPayload {
 
 | 事件名                          | 触发时机                     | reason                     | payload 主要字段                               |
 | ------------------------------- | ---------------------------- | -------------------------- | ---------------------------------------------- |
-| `nacp:internal:gateway:success` | Gateway 将地址消息转发出站   | `forwarded`                | `{ toPeerId, msg, reason }`                    |
+| `nacp:internal:gateway:success` | 本端 Provider 已接纳转发包 | `forwarded`                | `{ toPeerId, msg, reason }`                    |
 | `nacp:internal:gateway:error`   | 错误地址消息不能或不允许转发 | `dropped`                  | `{ msg, reason }`                              |
 | `nacp:internal:gateway:warning` | 第二个 Gateway 声明被降级    | `multi-gateway-downgraded` | `{ appId, peerId, keptGatewayPeerId, reason }` |
 

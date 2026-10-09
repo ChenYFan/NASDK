@@ -1,6 +1,4 @@
-import type { ClientTransportProvider, TransportChannel } from '@chenyfan/nasdk/NACT'
-
-const receiveModeConflict = () => Object.assign(new Error('transport receive mode conflict'), { code: 'receive-mode-conflict' })
+import type { ClientProvider, Channel } from '@nyirusu/nasdk/NACT'
 
 export interface WebSocketClientOptions { url: string }
 export interface WebSocketClientTransportSpec {
@@ -19,24 +17,23 @@ interface SocketLike {
   removeEventListener(type: string, listener: (event: any) => void): void
 }
 
-class WebSocketChannel implements TransportChannel {
-  private receiveMode?: 'callback' | 'iterator'
+class WebSocketChannel implements Channel {
   private errorHandlers = new Set<(reason: unknown) => void>()
   constructor(private socket: SocketLike) {}
-  send(chunks: readonly Uint8Array[]) {
-    const size = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-    const frame = new Uint8Array(size)
+  send(frame: readonly Uint8Array[]) {
+    if (this.socket.readyState !== 1) throw Object.assign(new Error('transport-closed'), { code: 'transport-closed' })
+    const size = frame.reduce((sum, part) => sum + part.byteLength, 0)
+    const bytes = new Uint8Array(size)
     let offset = 0
-    for (const chunk of chunks) { frame.set(chunk, offset); offset += chunk.byteLength }
-    this.socket.send(frame)
+    for (const part of frame) { bytes.set(part, offset); offset += part.byteLength }
+    this.socket.send(bytes)
   }
   close() { this.socket.close() }
   terminate() { this.socket.terminate?.() ?? this.socket.close() }
-  onReceive(handler: (bytes: Uint8Array) => void) {
-    this.lock('callback')
+  onReceive(handler: (frame: readonly Uint8Array[]) => void) {
     const listener = (event: MessageEvent) => {
-      if (event.data instanceof ArrayBuffer) handler(new Uint8Array(event.data))
-      else if (ArrayBuffer.isView(event.data)) handler(new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength))
+      if (event.data instanceof ArrayBuffer) handler([new Uint8Array(event.data)])
+      else if (ArrayBuffer.isView(event.data)) handler([new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength)])
       else this.fail('non-binary-frame')
     }
     this.socket.addEventListener('message', listener)
@@ -51,43 +48,16 @@ class WebSocketChannel implements TransportChannel {
     this.socket.addEventListener('error', listener)
     return () => { this.errorHandlers.delete(handler); this.socket.removeEventListener('error', listener) }
   }
-  async *[Symbol.asyncIterator]() {
-    this.lock('iterator')
-    const queue: Uint8Array[] = []
-    let wake: (() => void) | undefined
-    let ended = false
-    const onMessage = (event: MessageEvent) => {
-      if (event.data instanceof ArrayBuffer) queue.push(new Uint8Array(event.data))
-      else if (ArrayBuffer.isView(event.data)) queue.push(new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength))
-      wake?.()
-    }
-    const onClose = () => { ended = true; wake?.() }
-    this.socket.addEventListener('message', onMessage); this.socket.addEventListener('close', onClose)
-    try {
-      while (!ended || queue.length) {
-        if (!queue.length) await new Promise<void>(resolve => { wake = resolve })
-        wake = undefined
-        const bytes = queue.shift()
-        if (bytes) yield bytes
-      }
-    } finally {
-      this.socket.removeEventListener('message', onMessage); this.socket.removeEventListener('close', onClose)
-    }
-  }
-  private lock(mode: 'callback' | 'iterator') {
-    if (this.receiveMode && this.receiveMode !== mode) throw receiveModeConflict()
-    this.receiveMode = mode
-  }
   private fail(reason: unknown) { for (const handler of this.errorHandlers) handler(reason) }
 }
 
 export default class WebSocketClientProvider
-  implements ClientTransportProvider<'websocket', WebSocketClientOptions> {
+  implements ClientProvider<'websocket', WebSocketClientOptions> {
   readonly type = 'websocket'
   readonly role = 'client'
   readonly defaultChunkSize = 100 * 1024 * 1024
 
-  async dial(options: WebSocketClientOptions): Promise<TransportChannel> {
+  async dial(options: WebSocketClientOptions): Promise<Channel> {
     const Constructor = typeof WebSocket === 'undefined'
       ? (await import('ws')).default
       : WebSocket

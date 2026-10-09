@@ -1,11 +1,4 @@
-/**
- * edge/nacp — 临界值与压力。
- *
- * full/nacp 覆盖协议正常路径，这里挑规模与退化：大量并发 pending、订阅表规模、
- * 断连时的批量清理、消息字段的退化形状、Gateway 转发的规模。
- *
- * 大部分测试用 fakePeer（不开 socket），因为要测的是 NACP 的表和状态机，不是网络。
- */
+// Most tests use fakePeer (no socket): the targets are NACP tables and state machines.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -18,7 +11,7 @@ import {
 
 const SLOW = !!process.env.NASDK_SLOW
 
-/** 一个绑好 fakePeer 的裸 App：peerId 已入 NACP 的 appId 表，可以直接收发。 */
+/** Bare app with a fakePeer bound: peerId registered, ready to send/receive. */
 async function bound(id = 'me', peerName = 'p1', opt) {
   const app = await startBare(id, opt)
   const { peer, sent } = fakePeer(app, peerName)
@@ -28,7 +21,7 @@ async function bound(id = 'me', peerName = 'p1', opt) {
   return { app, peer, sent }
 }
 
-// ── pending 表规模 ──
+// ── pending table scale ──
 
 test('5000 条并发 request：每条回包各归各位，不串号', async () => {
   const spec = unix('edge-nacp-conc')
@@ -38,7 +31,7 @@ test('5000 条并发 request：每条回包各归各位，不串号', async () =
   const [results, ms] = await timed(() => Promise.all(
     Array.from({ length: N }, (_, i) => cli.request('srv', { kind: 'ability', target: 'add', payload: { a: i, b: 0 } }).response),
   ))
-  // 回值等于自己的入参 —— 这是「pending 表没把回包交错」的直接证据
+  // Each result matching its own input proves pending responses didn't cross.
   assert.deepEqual(results.map(r => r.payload), Array.from({ length: N }, (_, i) => i))
   assert.equal(cli.nacp.getPendingCount(), 0, '全部 settle，表清空')
   console.log(`    ${N} 条并发 request: ${ms.toFixed(0)}ms (${(N / (ms / 1000)).toFixed(0)} req/s)`)
@@ -49,7 +42,7 @@ test('5000 条 pending 挂着时断连：宽限期后全部 reject，表清空',
   const { app, peer } = await bound('cli-many', 'p1', { reconnectGraceMs: 20 })
   const N = 5000
 
-  // fakePeer 不答 request（只答四种握手），所以这些会一直挂着
+  // fakePeer never answers requests (handshakes only), so these stay pending.
   const pendings = Array.from({ length: N }, (_, i) =>
     app.nacp.request('them', { kind: 'ability', target: 't', payload: { i } }).catch(e => e))
   await sleep(50)
@@ -84,7 +77,7 @@ test('terminate 时挂着的 pending 全部 reject 为 terminate', async () => {
 })
 
 test('request 到没有路由的 appId：立刻 reject not-sent，不进 pending 表', async () => {
-  // REQUEST_TIMEOUT_MS = -1（业务调用不设超时），所以没有这条检查就会永远挂着。
+  // REQUEST_TIMEOUT_MS = -1 (caller-owned timeouts): without this check it would hang forever.
   const app = await startBare('lonely')
   const [err, ms] = await timed(() => app.nacp.request('压根不存在', { kind: 'ability', target: 't' }).catch(e => e))
   assert.ok(err instanceof NACPError)
@@ -104,7 +97,7 @@ test('1000 条 not-sent 连续失败，pending 表始终为 0', async () => {
   await app.terminate().catch(() => {})
 })
 
-// ── 订阅表规模 ──
+// ── subscription table scale ──
 
 test('2000 条订阅进来：全部入表，转发监听器都在', async () => {
   const { app, sent } = await bound('sub-host')
@@ -118,7 +111,7 @@ test('2000 条订阅进来：全部入表，转发监听器都在', async () => 
   assert.equal(app.nacp.getSubCount(), N, `${N} 条订阅记录`)
   console.log(`    ${N} 条入站订阅: ${ms.toFixed(0)}ms`)
 
-  // 每条订阅对应一个 bus listener：emit 一个 topic 只该发一条 notify
+  // Each subscription gets one bus listener: one topic emit must send exactly one notify.
   const before = sent.length
   app.bus.emit('topic:500', { hit: true })
   await sleep(10)
@@ -143,7 +136,7 @@ test('2000 条订阅在断连宽限期后一次性清空，bus 上不留监听�
   })
   assert.equal(app.nacp.getSubCount(), 0, '订阅表清空')
 
-  // 关键：bus 上的转发监听器也得摘掉，否则 emit 还会试着往死 peer 发
+  // Bus-side forward listeners must be removed too, else emit still fires at the dead peer.
   const before = sent.length
   for (let i = 0; i < 2000; i++) app.bus.emit(`t:${i}`, {})
   await sleep(20)
@@ -154,7 +147,7 @@ test('2000 条订阅在断连宽限期后一次性清空，bus 上不留监听�
 
 test('同一个 targetSubName 被 500 个不同 subId 订阅：emit 一次发 500 条', async () => {
   const { app, sent } = await bound('multi-sub')
-  app.bus.onError = () => {}                    // maxListeners 警告
+  app.bus.onError = () => {}                    // swallow maxListeners warnings
   for (let i = 0; i < 500; i++) {
     app.nacp.inbound(msg('subscribe', { from: 'them', to: 'multi-sub', id: `dup${i}`, payload: { targetSubName: 'hot' } }), app.nact.getPeer('p1'))
   }
@@ -182,7 +175,7 @@ test('通配符订阅：一条订阅命中多个 topic，hitSubName 各不相同
   await app.terminate().catch(() => {})
 })
 
-// ── listen 表规模（出站订阅侧）──
+// ── listen table scale (outbound side) ──
 
 test('1000 条出站订阅，notify 按 parentId 各自派送', async () => {
   const { app, peer, sent } = await bound('listener')
@@ -194,8 +187,8 @@ test('1000 条出站订阅，notify 按 parentId 各自派送', async () => {
   await Promise.all(subs.map(p => p?.catch(() => {})))
   assert.equal(app.nacp.getListenCount(), 1000, '1000 条 listen 记录')
 
-  // subId 就是那条 subscribe 消息自己的 id。fakePeer 把发出去的消息都记下来了，
-  // 从中取回每条订阅的真实 subId，再按 parentId 反向喂 notify。
+  // The subId is the subscribe message's own id. fakePeer records sent messages;
+  // recover real subIds from them, then feed notifies back by parentId.
   const subMsgs = sent.filter(m => m.type === 'subscribe')
   assert.equal(subMsgs.length, 1000, '1000 条 subscribe 真的发出去了')
 
@@ -215,7 +208,7 @@ test('1000 条出站订阅，notify 按 parentId 各自派送', async () => {
   await app.terminate().catch(() => {})
 })
 
-// ── 消息字段退化 ──
+// ── degenerate message fields ──
 
 test('payload 是各种退化值都能收发', async () => {
   const { app, sent } = await bound('degen')
@@ -237,25 +230,25 @@ test('超长 appId / targetSubName / target 都只是字符串', async () => {
 })
 
 test('入站消息缺字段 / 字段类型不对：不崩，落到相应的错误通道', async () => {
-  // 用 bound()：them 已绑到 p1，所以回给 them 的 response 能真正路由出去、进 sent。
-  // （fakePeer 的 sent 只记它自己 send 的；response 到未注册的 from 会路由失败、不进任何 peer。）
+  // bound() makes 'them' resolve to p1, so responses route out and land in sent.
+  // (fakePeer's sent only records its own sends; responses to unregistered froms route nowhere.)
   const { app, peer, sent } = await bound('robust')
   const errs = collect(app.bus, 'nacp:internal:*:error')
 
-  // 这些都是协议上不该出现的形状 —— 关键是「不崩」，而不是具体怎么报
+  // Shapes that must never occur in protocol — the point is "no crash", not how it reports.
   const bad = [
-    msg('notify', { from: 'them', to: 'robust', meta: {} }),                          // 没有 parentId
-    msg('response', { from: 'them', to: 'robust', meta: { parentId: '不存在' } }),      // 无主回包
-    msg('unsubscribe', { from: 'them', to: 'robust', payload: { targetSubId: '无' } }), // 无主退订
-    msg('subscribe', { from: 'them', to: 'robust', id: 'bad-sub', payload: {} }),       // 没有 targetSubName
+    msg('notify', { from: 'them', to: 'robust', meta: {} }),                          // no parentId
+    msg('response', { from: 'them', to: 'robust', meta: { parentId: '不存在' } }),      // orphan response
+    msg('unsubscribe', { from: 'them', to: 'robust', payload: { targetSubId: '无' } }), // orphan unsubscribe
+    msg('subscribe', { from: 'them', to: 'robust', id: 'bad-sub', payload: {} }),       // no targetSubName
   ]
   for (const m of bad) assert.doesNotThrow(() => app.nacp.inbound(m, peer), `type=${m.type}`)
   await sleep(20)
   errs.stop()
   assert.ok(errs.events.length >= 2, `至少几条进了错误通道，实得 ${errs.events.length}`)
 
-  // 缺 targetSubName 的 subscribe：曾经会让 bus.listen(undefined) 抛 TypeError、冒到 inbound 外把连接拆掉。
-  // 现在应当只是被拒：既进 subscribeError，又回一条 isOk:false 的 response，连接照旧。
+  // A subscribe without targetSubName used to throw from bus.listen(undefined) and kill the
+  // connection. Now it must be rejected: subscribeError plus isOk:false response, connection alive.
   const subErr = errs.events.find(e => e.payload.reason === 'bad-target-sub-name')
   assert.ok(subErr, 'subscribe 缺 targetSubName 落到 bad-target-sub-name')
   const reject = sent.find(m => m.type === 'response' && m.meta.parentId === 'bad-sub')
@@ -274,7 +267,7 @@ test('未知 type 的入站消息被忽略而不是崩', async () => {
   await app.terminate().catch(() => {})
 })
 
-// ── 并发连接 + Gateway ──
+// ── concurrent connections + Gateway ──
 
 test('50 个 App 同时注册到一个 Gateway，路由表全对', async () => {
   const spec = tcp(PORT.edgeB)
@@ -296,7 +289,7 @@ test('50 个 App 同时注册到一个 Gateway，路由表全对', async () => {
   for (let i = 0; i < N; i++) assert.ok(gw.nacp.checkAppId(`peer${i}`), `peer${i} 在表里`)
   console.log(`    ${N} 个 App 注册到 Gateway: ${ms.toFixed(0)}ms`)
 
-  // 经 Gateway 互打：peer0 → peer49
+  // Cross traffic via Gateway: peer0 → peer49
   const [res, fwdMs] = await timed(() => clients[0].app.request('peer49', { kind: 'ability', target: 'add', payload: { a: 20, b: 22 } }).response)
   assert.equal(res.payload, 42, '经 Gateway 转发打通')
   console.log(`    经 Gateway 的一次往返: ${fwdMs.toFixed(1)}ms`)
@@ -326,7 +319,7 @@ test('Gateway 转发 500 条并发，全部到位', async () => {
   await stopA(); await stopB(); await stopGw()
 })
 
-// ── AutoSub 规模 ──
+// ── AutoSub scale ──
 
 test('500 条并发 event request，AutoSub 表在终结后全部回收', async () => {
   const spec = unix('edge-nacp-autosub')
@@ -348,10 +341,10 @@ test('500 条并发 event request，AutoSub 表在终结后全部回收', async 
   await stop()
 })
 
-// ── 超时路径（默认 skip）──
+// ── timeout paths (skipped by default) ──
 
 test('subscribe 无人应答：10s 后 reject timeout', { skip: !SLOW }, async () => {
-  // RESPONSE_TIMEOUT_MS = 10s（握手类必须快）。answer:false 让 fakePeer 只记录不答。
+  // RESPONSE_TIMEOUT_MS = 10s (handshakes must be fast). answer:false makes fakePeer silent.
   const app = await startBare('silent')
   const { peer } = fakePeer(app, 'p-silent', { answer: false })
   app.nact.addPeer(peer)
@@ -366,7 +359,7 @@ test('subscribe 无人应答：10s 后 reject timeout', { skip: !SLOW }, async (
 })
 
 test('request 永不超时 —— REQUEST_TIMEOUT_MS = -1 是刻意的', async () => {
-  // 业务调用多久算超时，框架无从知道。这条钉住「有路由但对端不答 → 一直等」。
+  // The framework can't know a business timeout; routed-but-unanswered requests wait forever.
   const app = await startBare('patient')
   const { peer } = fakePeer(app, 'p-quiet', { answer: false })
   app.nact.addPeer(peer)

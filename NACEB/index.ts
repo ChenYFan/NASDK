@@ -1,8 +1,3 @@
-/**
- * NACEB public API barrel: the assembly, authoring bases, contracts, instance classes, and the layer error
- * + veto signal.
- */
-
 export { NACEB } from './NACEB.ts'
 
 export {
@@ -24,5 +19,5 @@ export { TaskInstance } from './controller/TaskFSMController.ts'
 export { PipelineInstance } from './controller/PipelineFSMController.ts'
 export { EventInstance } from './controller/EventFSMController.ts'
 
-// VetoT: throw new VetoT('reason') from a beforeT hook to veto that transition.
+// Throw new VetoT('reason') from a beforeT hook to veto that transition.
 export { NACEBError, nacebInbound, nacebInternal, nacebOutbound, VetoT } from './errors.ts'

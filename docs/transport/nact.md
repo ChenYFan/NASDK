@@ -13,7 +13,7 @@ NACT 对上只暴露统一的 `Peer`：
 ```ts
 interface Peer {
   id: NACTPeerId
-  send(msg: NACPMessage): void
+  send(msg: NACPMessage): Promise<void>
   close(): void
   terminate?(): void
 }
@@ -22,9 +22,9 @@ interface Peer {
 ## 更多
 
 - 收发与编解码：[入站与出站](/transport/nact/inbound-outbound)
-- 分片与重组：[NACT Framing](/transport/nact/framing)
-- 安装、监听与连接：[底层传输](/transport/nact/transport)
+- 分帧与重组：[NACT Framing](/transport/nact/framing)
+- 安装、监听与连接：[传输 Provider](/transport/nact/provider)
 - 各运行时安装哪个包：[运行时接入](/transport/nact/runtime-build)
 - 连接生命周期：[生命周期](/transport/nact/lifecycle)
 - 观测事件清单：[可观测](/transport/nact/observability)
-- 扩展自定义传输：[自定义传输Provider](/transport/nact/provider)
+- 接入其他载体或鉴权：[自定义 Provider](/transport/nact/custom-provider)

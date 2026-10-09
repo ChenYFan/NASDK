@@ -1,12 +1,12 @@
 # 构造一个 NACEB
 
 ```ts
-import { NACEB } from '@chenyfan/nasdk/NACEB'
+import { NACEB } from '@nyirusu/nasdk/NACEB'
 import type {
   EventAlias,
   PipelineHandler,
   TaskHandler,
-} from '@chenyfan/nasdk/NACEB'
+} from '@nyirusu/nasdk/NACEB'
 
 const naceb = new NACEB({ // [!code focus:5]
   pipelineHandlers: PipelineHandler[],
@@ -32,7 +32,7 @@ import {
   NACEB,
   PipelineHandler,
   TaskHandler,
-} from '@chenyfan/nasdk/NACEB'
+} from '@nyirusu/nasdk/NACEB'
 
 class GreetingPipeline extends PipelineHandler { // [!code focus:29]
   name = 'greeting'

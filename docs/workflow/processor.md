@@ -11,7 +11,7 @@ import type {
   Processor,
   ProcessorHooks,
   ProcessorSpec,
-} from '@chenyfan/nasdk/types'
+} from '@nyirusu/nasdk/types'
 
 interface Processor {
   list(): { name: string; description: string }[]

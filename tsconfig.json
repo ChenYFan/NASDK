@@ -16,6 +16,9 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true,
 
+    // Lets tsx run the tests against provider sources without building nact-provider-shared first.
+    "paths": { "@nyirusu/nact-provider-shared": ["./packages/nact-provider-shared/index.ts"] },
+
     "types": ["node"],
     "skipLibCheck": true,
     "esModuleInterop": true,

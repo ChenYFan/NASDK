@@ -33,6 +33,6 @@ sequenceDiagram
     A-->>B: ACK
 ```
 
-`ack()` 在 ACK 交给目标 NACT Peer 后结算Promise。
+`ack()` 在本端 Provider 成功接纳该 ACK 包的全部 NACT 帧后 resolve `true`，不等待对端确认。接纳失败或消息被放弃时 resolve `false`；断连宽限期间可继续等待重连。
 
 ACK 的接收与结算见 [onAck](/transport/nacp/inbound/on-ack)。

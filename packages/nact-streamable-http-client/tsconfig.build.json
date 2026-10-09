@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.provider-build.json",
+  "compilerOptions": { "outDir": "dist", "rootDir": "." },
+  "include": ["*.ts"]
+}

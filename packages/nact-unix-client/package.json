@@ -1,12 +1,13 @@
 {
-  "name": "@chenyfan/nact-unix-client",
+  "name": "@nyirusu/nact-unix-client",
   "version": "1.0.4",
   "type": "module",
   "files": ["dist/index.js", "dist/index.js.map", "dist/index.d.ts", "dist/index.d.ts.map"],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
-  "scripts": { "build": "tsc -p tsconfig.build.json", "typecheck": "tsc -p tsconfig.json --noEmit" },
-  "peerDependencies": { "@chenyfan/nasdk": ">=1.0.4" },
-  "peerDependenciesMeta": { "@chenyfan/nasdk": { "optional": true } }
+  "scripts": { "build": "tsc -p tsconfig.build.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "npm run test:simple", "test:simple": "node --import tsx --test test/simple.test.mjs", "test:full": "node --import tsx --test test/full.test.mjs", "test:edge": "node --import tsx --test test/edge.test.mjs" },
+  "dependencies": { "@nyirusu/nact-provider-shared": "1.0.4" },
+  "peerDependencies": { "@nyirusu/nasdk": ">=1.0.4" },
+  "peerDependenciesMeta": { "@nyirusu/nasdk": { "optional": true } }
 }

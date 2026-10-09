@@ -1,13 +1,18 @@
 import http from 'node:http'
+import type { Duplex } from 'node:stream'
 import { WebSocketServer, type RawData, type WebSocket } from 'ws'
-import type { ServerHandle, ServerTransportProvider, TransportChannel } from '@chenyfan/nasdk/NACT'
+import type { ServerHandle, ServerProvider, Channel } from '@nyirusu/nasdk/NACT'
 
-const receiveModeConflict = () => Object.assign(new Error('transport receive mode conflict'), { code: 'receive-mode-conflict' })
-
-export interface WebSocketServerOptions {
+export type WebSocketServerOptions = {
   host: string
   port: number
   path?: string
+  noServer?: false
+} | {
+  noServer: true
+  path?: never
+  host?: never
+  port?: never
 }
 export interface WebSocketServerTransportSpec {
   type: 'websocket'
@@ -15,35 +20,23 @@ export interface WebSocketServerTransportSpec {
   nact?: { chunkSize?: number }
 }
 
-function bytesOf(data: RawData): Uint8Array {
-  if (Array.isArray(data)) {
-    const size = data.reduce((sum, part) => sum + part.byteLength, 0)
-    const bytes = new Uint8Array(size)
-    let offset = 0
-    for (const part of data) { bytes.set(part, offset); offset += part.byteLength }
-    return bytes
-  }
-  return data instanceof ArrayBuffer ? new Uint8Array(data) : data
-}
-
-class WebSocketChannel implements TransportChannel {
-  private receiveMode?: 'callback' | 'iterator'
+class WebSocketChannel implements Channel {
   private errorHandlers = new Set<(reason: unknown) => void>()
   constructor(private socket: WebSocket) {}
-  send(chunks: readonly Uint8Array[]) {
-    const size = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0)
-    const frame = new Uint8Array(size)
+  send(frame: readonly Uint8Array[]) {
+    if (this.socket.readyState !== 1) throw Object.assign(new Error('transport-closed'), { code: 'transport-closed' })
+    const size = frame.reduce((sum, part) => sum + part.byteLength, 0)
+    const bytes = new Uint8Array(size)
     let offset = 0
-    for (const chunk of chunks) { frame.set(chunk, offset); offset += chunk.byteLength }
-    this.socket.send(frame)
+    for (const part of frame) { bytes.set(part, offset); offset += part.byteLength }
+    this.socket.send(bytes)
   }
   close() { this.socket.close() }
   terminate() { this.socket.terminate() }
-  onReceive(handler: (bytes: Uint8Array) => void) {
-    this.lock('callback')
+  onReceive(handler: (frame: readonly Uint8Array[]) => void) {
     const listener = (data: RawData, isBinary: boolean) => {
       if (!isBinary) return this.fail('non-binary-frame')
-      handler(bytesOf(data))
+      handler([data as Buffer])   // default binaryType 'nodebuffer': one Buffer per message
     }
     this.socket.on('message', listener)
     return () => this.socket.off('message', listener)
@@ -54,48 +47,68 @@ class WebSocketChannel implements TransportChannel {
     this.socket.on('error', handler)
     return () => { this.errorHandlers.delete(handler); this.socket.off('error', handler) }
   }
-  async *[Symbol.asyncIterator]() {
-    this.lock('iterator')
-    const queue: Uint8Array[] = []
-    let wake: (() => void) | undefined
-    let ended = false
-    const onMessage = (data: RawData, isBinary: boolean) => { if (isBinary) queue.push(bytesOf(data)); wake?.() }
-    const onClose = () => { ended = true; wake?.() }
-    this.socket.on('message', onMessage); this.socket.on('close', onClose)
-    try {
-      while (!ended || queue.length) {
-        if (!queue.length) await new Promise<void>(resolve => { wake = resolve })
-        wake = undefined
-        const bytes = queue.shift()
-        if (bytes) yield bytes
-      }
-    } finally {
-      this.socket.off('message', onMessage); this.socket.off('close', onClose)
-    }
-  }
-  private lock(mode: 'callback' | 'iterator') {
-    if (this.receiveMode && this.receiveMode !== mode) throw receiveModeConflict()
-    this.receiveMode = mode
-  }
   private fail(reason: unknown) { for (const handler of this.errorHandlers) handler(reason) }
 }
 
 export default class WebSocketServerProvider
-  implements ServerTransportProvider<'websocket', WebSocketServerOptions> {
+  implements ServerProvider<'websocket', WebSocketServerOptions> {
   readonly type = 'websocket'
   readonly role = 'server'
   readonly defaultChunkSize = 100 * 1024 * 1024
+  private websocket?: WebSocketServer
+  private detach = new Set<() => void>()
 
-  async listen(options: WebSocketServerOptions, accept: (channel: TransportChannel) => void): Promise<ServerHandle> {
-    const server = http.createServer()
-    const websocket = new WebSocketServer({ server, path: options.path, perMessageDeflate: false })
+  attach(server: http.Server, options: { path?: string } = {}): () => void {
+    if (!this.websocket) throw Object.assign(new Error('provider-not-listening'), { code: 'provider-not-listening' })
+    return this.attachServer(server, options)
+  }
+
+  private attachServer(server: http.Server, options: { path?: string }, owned = false): () => void {
+    const websocket = this.websocket!
+    const upgrade = (request: http.IncomingMessage, socket: Duplex, head: Buffer) => {
+      if (options.path && new URL(request.url ?? '/', 'http://localhost').pathname !== options.path) {
+        if (owned) socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
+        return
+      }
+      websocket.handleUpgrade(request, socket, head, ws => websocket.emit('connection', ws, request))
+    }
+    const detach = () => { server.off('upgrade', upgrade); this.detach.delete(detach) }
+    server.on('upgrade', upgrade)
+    this.detach.add(detach)
+    return detach
+  }
+
+  async listen(options: WebSocketServerOptions, accept: (channel: Channel) => void): Promise<ServerHandle> {
+    if (this.websocket) throw Object.assign(new Error('provider-already-listening'), { code: 'provider-already-listening' })
+    const server = options.noServer ? undefined : http.createServer()
+    const websocket = new WebSocketServer({ noServer: true, perMessageDeflate: false })
+    this.websocket = websocket
     websocket.on('connection', socket => accept(new WebSocketChannel(socket)))
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject)
-      server.listen(options.port, options.host, () => { server.off('error', reject); resolve() })
-    })
+    if (server && !options.noServer) {
+      this.attachServer(server, options, true)
+      try {
+        await new Promise<void>((resolve, reject) => {
+          server.once('error', reject)
+          server.listen(options.port, options.host, () => { server.off('error', reject); resolve() })
+        })
+      } catch (reason) {
+        for (const detach of this.detach) detach()
+        this.websocket = undefined
+        websocket.close()
+        throw reason
+      }
+    }
+    let closing: Promise<void> | undefined
     return {
-      close: () => new Promise(resolve => websocket.close(() => server.close(() => resolve()))),
+      close: () => closing ??= new Promise(resolve => {
+        this.websocket = undefined
+        for (const detach of this.detach) detach()
+        for (const socket of websocket.clients) socket.terminate()
+        websocket.close(() => {
+          if (server) server.close(() => resolve())
+          else resolve()
+        })
+      }),
     }
   }
 }

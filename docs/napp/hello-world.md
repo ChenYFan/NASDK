@@ -5,17 +5,17 @@
 ## 安装
 
 ```bash
-npm install @chenyfan/nasdk \
-  @chenyfan/nact-websocket-server \
-  @chenyfan/nact-websocket-client
+npm install @nyirusu/nasdk \
+  @nyirusu/nact-websocket-server \
+  @nyirusu/nact-websocket-client
 ```
 
 ## 创建 World NApp
 
 
 ```js world.mjs
-import NApp, { NACAB } from '@chenyfan/nasdk'
-import WebSocketServerProvider from '@chenyfan/nact-websocket-server'
+import NApp, { NACAB } from '@nyirusu/nasdk'
+import WebSocketServerProvider from '@nyirusu/nact-websocket-server'
 
 const abilities = new NACAB()
 abilities.register({
@@ -41,8 +41,8 @@ console.log('World NApp is listening on ws://127.0.0.1:18900/nacp')
 
 
 ```js hello.mjs
-import NApp from '@chenyfan/nasdk'
-import WebSocketClientProvider from '@chenyfan/nact-websocket-client'
+import NApp from '@nyirusu/nasdk'
+import WebSocketClientProvider from '@nyirusu/nact-websocket-client'
 
 const hello = new NApp({ id: 'hello' })
 hello.nact.use(new WebSocketClientProvider())

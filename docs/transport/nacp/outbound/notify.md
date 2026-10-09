@@ -33,7 +33,7 @@ sequenceDiagram
 
 一个订阅可以产生 `0..N` 条 Notify。Notify 不期待 ACK 或 Response。
 
-`notify()` 在消息交给目标 NACT Peer 后结算Promise。
+`notify()` 在本端 Provider 成功接纳该 NACP 包的全部 NACT 帧后 resolve `true`。这不表示字节已写出或对端已收到。接纳失败或消息被放弃时 resolve `false`；断连宽限期间可继续等待重连。
 
 :::danger
 目标离线时 Notify 可以进入积压表，此时会卡住Promise导致无法结算。

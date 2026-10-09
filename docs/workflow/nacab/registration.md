@@ -13,7 +13,7 @@ abstract class AbilityHandler<R = unknown> {
 ```
 
 ```ts
-import { NACAB, AbilityHandler } from '@chenyfan/nasdk/NACAB'
+import { NACAB, AbilityHandler } from '@nyirusu/nasdk/NACAB'
 
 class Add extends AbilityHandler<number> { // [!code focus:9]
   readonly name = 'math.add'

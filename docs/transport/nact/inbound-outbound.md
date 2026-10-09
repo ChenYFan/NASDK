@@ -1,11 +1,11 @@
 # 入站与出站
 
-NACT 位于 NACP 与 Transport Provider 之间，负责编码、打包与分帧数据。
+NACT 负责编码、打包与分帧NACP数据。
 
 ```mermaid
 flowchart TD
     P[NACP] <-->|NACPMessage| T[NACT]
-    T <-->|传输数据| C[Transport Provider]
+    T <-->|传输数据| C[NACT Transport Provider]
 ```
 
 
@@ -17,7 +17,7 @@ NACP 使用 `sendToPeer()` 将消息交给指定的物理连接：
 nact.sendToPeer(
   peerId: NACTPeerId,
   message: NACPMessage,
-): boolean
+): Promise<boolean>
 ```
 
 | 参数 | 说明 |
@@ -26,24 +26,21 @@ nact.sendToPeer(
 | `message` | 需要发送的完整 NACPMessage |
 
 ```ts
-const sent = app.nact.sendToPeer(peerId, message)
+const accepted:Boolean = await app.nact.sendToPeer(peerId, message)
 ```
 
-返回值含义：
+:::warning
+- resolve `true`：本端 Provider 已成功接纳该 NACP 包对应的全部 NACT 帧，并负责后续发送。
+- resolve `false`：Peer 不存在，未提交发送。
+- reject：编码失败、Provider 拒绝接纳，或接纳完成前连接关闭。
 
-- `true`：Peer 存在，NACT 已将消息交给该 Peer 发送。
-- `false`：Peer 不存在，消息没有发送。
-
-
-:::tip
-`true` 不表示对端已经收到或处理消息。
-
-ACK、Response 和重发等协议行为由 NACP 负责。
+需要注意的是，返回true并不意味着消息已经到达对端，而是指`离开了NACT，进入了对应物理发送渠道队列中`。
 :::
 
 
 通常由 `NACP.outbound()` 在完成 App 路由后调用 `sendToPeer()`。
 
+:::details 出站交接流程
 ```mermaid
 sequenceDiagram
     participant P as NACP
@@ -52,8 +49,11 @@ sequenceDiagram
 
     P->>T: sendToPeer(peerId, message)
     T->>T: 查找 Peer 并处理消息
-    T->>R: 发送传输数据
+    T->>R: 依次提交 NACT 帧
+    R-->>T: 全部帧接纳完成
+    T-->>P: resolve true
 ```
+:::
 
 ## 入站
 
@@ -83,14 +83,11 @@ sequenceDiagram
 ```
 
 :::warning
-`nacp.inbound()` 由 NACT 自动调用。普通调用方不应手动调用它。
+`nacp.inbound()` 由 NACT 自动调用。普通调用方**不应**手动调用它，手动调用等同于伪造一条来自指定 Peer 的入站消息。
 
-手动调用等同于伪造一条来自指定 Peer 的入站消息，主要用于 NACT 接入与测试。
-
-如果需要接入自定义Provider，请使用[自定义传输Provider](/transport/nact/provider)
+如果需要接入其他物理传输方式或附着到已有的服务器，则应该使用[自定义 Provider](/transport/nact/custom-provider)
 :::
 
-地址检查、ACK、去重、路由和具体消息类型处理由 NACP 接管消息后负责，这些行为见 [NACP 入站](/transport/nacp/inbound)。
 
 ## Peer
 
@@ -99,7 +96,7 @@ NACT 使用 Peer 标识一条已经建立的物理连接：
 ```ts
 interface Peer {
   id: NACTPeerId
-  send(message: NACPMessage): void
+  send(message: NACPMessage): Promise<void>
   close(): void
   terminate?(): void
 }

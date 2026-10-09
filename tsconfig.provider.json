@@ -3,7 +3,10 @@
   "compilerOptions": {
     "lib": ["ES2022", "DOM"],
     "baseUrl": ".",
-    "paths": { "@chenyfan/nasdk/NACT": ["./NACT/index.ts"] },
+    "paths": {
+      "@nyirusu/nasdk/NACT": ["./NACT/index.ts"],
+      "@nyirusu/nact-provider-shared": ["./packages/nact-provider-shared/index.ts"]
+    },
     "noEmit": false,
     "declaration": true,
     "declarationMap": true,

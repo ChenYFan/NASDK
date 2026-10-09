@@ -15,7 +15,7 @@ interface EventAlias {
 ## 定义Alias
 
 ```ts
-import type { EventAlias } from '@chenyfan/nasdk/NACEB'
+import type { EventAlias } from '@nyirusu/nasdk/NACEB'
 
 const alias: EventAlias = {
   eventName: 'GreetingEvent',

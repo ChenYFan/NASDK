@@ -1,5 +1,5 @@
 {
-  "name": "@chenyfan/nasdk",
+  "name": "@nyirusu/nasdk",
   "version": "1.0.4",
   "description": "Nyirusu Application SDK, a general-purpose transport and dispatch framework",
   "author": "CyanFalse",
@@ -55,9 +55,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck --workspaces --if-present",
     "prepublishOnly": "npm run build",
     "test": "npm run test:simple",
-    "test:simple": "node --import tsx --test test/simple/*.test.mjs",
-    "test:full": "node --import tsx --test test/full/*.test.mjs",
-    "test:edge": "node --import tsx --test test/edge/*.test.mjs",
+    "test:simple": "node --import tsx --test test/simple/*.test.mjs && npm run test:simple --workspaces --if-present",
+    "test:full": "node --import tsx --test test/full/*.test.mjs && npm run test:full --workspaces --if-present",
+    "test:edge": "node --import tsx --test test/edge/*.test.mjs && npm run test:edge --workspaces --if-present",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"

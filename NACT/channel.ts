@@ -1,39 +1,57 @@
 import type { NACPMessage } from '../NACP/types.ts'
-import { makeReassembler, makeStreamParser, splitAndEmit } from './framing.ts'
+import { errorDetail } from '../types.ts'
+import { NACTError, codeOf, nactOutbound } from './errors.ts'
+import { makeFrameReceiver, splitAndEmit } from './framing.ts'
 import type { PeerHost } from './peer.ts'
-import type { Peer, TransportChannel } from './types.ts'
+import type { Channel, Peer } from './types.ts'
 
-function reasonOf(reason: unknown): string {
-  if (typeof reason === 'string') return reason
-  if (reason && typeof reason === 'object' && 'code' in reason && typeof reason.code === 'string') return reason.code
-  return 'transport-error'
-}
+const reasonOf = (reason: unknown) => codeOf(reason, 'transport-error')
 
-export function makeChannelPeer(host: PeerHost, channel: TransportChannel, chunkSize: number): Peer {
-  let sending: Promise<void> | undefined
+export function makeChannelPeer(host: PeerHost, channel: Channel, chunkSize: number): Peer {
+  let sending = Promise.resolve()
+  let failure: NACTError | undefined
+  const pending = new Set<(reason: NACTError) => void>()
+  const stop = (reason: NACTError) => {
+    failure ??= reason
+    for (const reject of pending) reject(failure)
+    pending.clear()
+  }
+  const fail = (reason: unknown) => {
+    if (failure) return
+    stop(nactOutbound(reasonOf(reason), `Provider failed: ${errorDetail(reason)}`, reason))
+    host.fail(peer, reasonOf(reason))
+  }
+  const closed = () => stop(nactOutbound('transport-closed', 'Provider closed before accepting all frames'))
   const peer: Peer = {
     id: crypto.randomUUID(),
-    send: (msg) => {
-      const encoded = host.codec.encode(msg)
-      splitAndEmit(encoded, chunkSize, (header, body) => {
-        const send = () => channel.send([header, body])
-        if (sending) {
-          sending = sending.then(send).catch(reason => host.fail(peer, reasonOf(reason)))
-          return
-        }
-        try {
-          const result = send()
-          if (result instanceof Promise) sending = result.catch(reason => host.fail(peer, reasonOf(reason)))
-        } catch (reason) {
-          host.fail(peer, reasonOf(reason))
-        }
+    send: async (msg) => {
+      if (failure) throw failure
+      let encoded: Uint8Array
+      try { encoded = host.codec.encode(msg) } catch (reason) {
+        throw nactOutbound('encode-failed', `cannot encode ${msg.type} message: ${errorDetail(reason)}`, reason)
+      }
+      const frames: (readonly Uint8Array[])[] = []
+      splitAndEmit(encoded, chunkSize, (header, body) => frames.push([header, body]))
+      return new Promise<void>((resolve, reject) => {
+        pending.add(reject)
+        const work = sending.then(async () => {
+          for (const frame of frames) {
+            if (failure) throw failure
+            await channel.send(frame)
+          }
+        })
+        sending = work.then(() => {
+          pending.delete(reject)
+          resolve()
+        }, fail)
       })
     },
-    close: () => { void channel.close() },
-    terminate: () => { void (channel.terminate?.() ?? channel.close()) },
+    close: () => { closed(); void channel.close() },
+    terminate: () => { closed(); void (channel.terminate?.() ?? channel.close()) },
   }
 
-  const reassembler = makeReassembler(
+  let broken = false
+  const receiver = makeFrameReceiver(
     (full) => {
       let message: NACPMessage
       try { message = host.codec.decode(full) } catch { return host.fail(peer, 'decode-failed') }
@@ -41,16 +59,17 @@ export function makeChannelPeer(host: PeerHost, channel: TransportChannel, chunk
     },
     reason => host.fail(peer, reason),
   )
-  const parse = makeStreamParser(reassembler)
 
-  channel.onReceive((bytes) => {
-    try { parse(bytes) } catch (reason) {
-      reassembler.clear()
+  channel.onReceive((frame) => {
+    if (broken) return
+    try { receiver.receive(frame) } catch (reason) {
+      broken = true
+      receiver.clear()
       host.fail(peer, reasonOf(reason))
     }
   })
-  channel.onClose(() => { reassembler.clear(); host.gone(peer) })
-  channel.onError(reason => host.fail(peer, reasonOf(reason)))
+  channel.onClose(() => { closed(); receiver.clear(); host.gone(peer) })
+  channel.onError(fail)
 
   host.arrived(peer)
   return peer

@@ -1,7 +1,6 @@
 import net from 'node:net'
-import type { ClientTransportProvider, TransportChannel } from '@chenyfan/nasdk/NACT'
-
-const receiveModeConflict = () => Object.assign(new Error('transport receive mode conflict'), { code: 'receive-mode-conflict' })
+import type { ClientProvider, Channel } from '@nyirusu/nasdk/NACT'
+import { makeFrameSplitter } from '@nyirusu/nact-provider-shared'
 
 export interface UnixClientOptions { path: string }
 export interface UnixClientTransportSpec {
@@ -10,35 +9,31 @@ export interface UnixClientTransportSpec {
   nact?: { chunkSize?: number }
 }
 
-class UnixChannel implements TransportChannel {
-  private receiveMode?: 'callback' | 'iterator'
+class UnixChannel implements Channel {
   constructor(private socket: net.Socket) {}
-  send(chunks: readonly Uint8Array[]) { for (const chunk of chunks) this.socket.write(chunk) }
+  send(frame: readonly Uint8Array[]) {
+    if (this.socket.destroyed || !this.socket.writable) throw Object.assign(new Error('transport-closed'), { code: 'transport-closed' })
+    for (const part of frame) this.socket.write(part)
+  }
   close() { this.socket.end() }
   terminate() { this.socket.destroy() }
-  onReceive(handler: (bytes: Uint8Array) => void) {
-    this.lock('callback'); this.socket.on('data', handler); return () => this.socket.off('data', handler)
+  onReceive(handler: (frame: readonly Uint8Array[]) => void) {
+    const push = makeFrameSplitter(handler, reason => this.socket.destroy(reason))
+    this.socket.on('data', push)
+    return () => this.socket.off('data', push)
   }
   onClose(handler: () => void) { this.socket.on('close', handler); return () => this.socket.off('close', handler) }
   onError(handler: (reason: unknown) => void) {
     this.socket.on('error', handler); return () => this.socket.off('error', handler)
   }
-  async *[Symbol.asyncIterator]() {
-    this.lock('iterator')
-    for await (const chunk of this.socket) yield chunk
-  }
-  private lock(mode: 'callback' | 'iterator') {
-    if (this.receiveMode && this.receiveMode !== mode) throw receiveModeConflict()
-    this.receiveMode = mode
-  }
 }
 
-export default class UnixClientProvider implements ClientTransportProvider<'unix', UnixClientOptions> {
+export default class UnixClientProvider implements ClientProvider<'unix', UnixClientOptions> {
   readonly type = 'unix'
   readonly role = 'client'
   readonly defaultChunkSize = 2 * 1024 * 1024 * 1024
 
-  async dial(options: UnixClientOptions): Promise<TransportChannel> {
+  async dial(options: UnixClientOptions): Promise<Channel> {
     const socket = await new Promise<net.Socket>((resolve, reject) => {
       const candidate = net.createConnection(options.path)
       candidate.once('connect', () => { candidate.off('error', reject); resolve(candidate) })

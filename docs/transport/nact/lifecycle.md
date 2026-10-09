@@ -14,7 +14,7 @@ stateDiagram-v2
     closed --> [*]
 ```
 
-`listen(spec)` 根据 `role=server + spec.type` 查找 Provider，由 Provider 创建监听服务，并返回对应的 `ServerHandle`：
+`listen(spec)` 根据 `role=server + spec.type` 查找 Provider。Provider 启用服务端入口（官方 Provider 会自建监听服务；自定义 Provider 也可以只提供入口，由宿主交付连接），并返回对应的 `ServerHandle`：
 
 ```ts
 interface ServerHandle {
@@ -24,7 +24,7 @@ interface ServerHandle {
 
 每个入口相互独立，调用 `ServerHandle.close()` 只关闭对应入口，已建立的 Peer 由 NACT 继续持有，不随入口关闭。
 
-底层传输与 `TransportSpec` 见[底层传输](/transport/nact/transport)。
+传输接入与 `TransportSpec` 见[传输 Provider](/transport/nact/provider)。
 
 ## Peer 生命周期
 
@@ -42,7 +42,7 @@ stateDiagram-v2
 
 ### 建立
 
-Client Provider 的 `dial()` 成功、Server Provider 接受连接，或 Custom Provider `open()` 后，NACT 从相同的 Channel 创建 `Peer`，分配 `peerId` 并写入 `peerTable`，随后宣告 `nact:peer:connect` 事件。
+Client Provider 的 `dial()` 成功，或 Server Provider 通过 `listen()` 的 `accept` 交付一条连接后，NACT 从相同的 `Channel` 创建 `Peer`，分配 `peerId` 并写入 `peerTable`，随后宣告 `nact:peer:connect` 事件。
 
 `dial()` 返回时 Peer 已经入表，可以立即用于 [`sendToPeer()`](/transport/nact/inbound-outbound#出站)。
 

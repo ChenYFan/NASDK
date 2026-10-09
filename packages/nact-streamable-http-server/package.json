@@ -1,0 +1,16 @@
+{
+  "name": "@nyirusu/nact-streamable-http-server",
+  "version": "1.0.4",
+  "type": "module",
+  "files": ["dist"],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "scripts": { "build": "tsc -p tsconfig.build.json", "typecheck": "tsc -p tsconfig.json --noEmit", "test": "npm run test:simple", "test:simple": "node --import tsx --test test/simple.test.mjs", "test:full": "node --import tsx --test test/full.test.mjs", "test:edge": "node --import tsx --test test/edge.test.mjs" },
+  "dependencies": { "@nyirusu/nact-provider-shared": "1.0.4" },
+  "peerDependencies": { "@nyirusu/nasdk": ">=1.0.4" },
+  "peerDependenciesMeta": { "@nyirusu/nasdk": { "optional": true } },
+  "license": "MIT",
+  "publishConfig": { "access": "public" },
+  "repository": { "type": "git", "url": "git+https://github.com/ChenYFan/NASDK.git", "directory": "packages/nact-streamable-http-server" }
+}

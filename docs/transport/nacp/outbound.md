@@ -16,9 +16,9 @@ NACP 出站族函数负责构造 NACPMessage 并提交发送。
 | `response`    | `Promise<boolean>`                 | `ACK`              | Processor 回调 / `NApp.response()`  |
 | `subscribe`   | `Promise<ResponseMessage> \| void` | `ACK` + <br> `RES` | `NApp.subscribe()` / NACP 内部      |
 | `unsubscribe` | `Promise<ResponseMessage> \| void` | `ACK` + <br> `RES` | `NApp.unsubscribe()` / NACP 内部    |
-| `notify`      | `Promise<boolean>`                 | -                  | 订阅转发 / `NApp.notify()`          |
+| `notify`      | `Promise<boolean>`                 | 本端 Provider 接纳 | 订阅转发 / `NApp.notify()`          |
 | `signal`      | `Promise<boolean>`                 | `ACK`              | `NApp.signal()`                     |
-| `ack`         | `Promise<boolean>`                 | -                  | NACP 入站流程                       |
+| `ack`         | `Promise<boolean>`                 | 本端 Provider 接纳 | NACP 入站流程                       |
 
 :::warning
 
@@ -53,6 +53,8 @@ NApp.nacp.outbound(
 | `opt.retransmit` | 标记为积压消息重发，避免重复加入积压表             |
 
 返回 `true` 只表示消息已被 NACP 接纳，目标离线、消息仍停留在积压表时也会返回 `true`。
+
+等待 Provider 接纳完成应使用 `notify()` / `ack()` 的 Promise，或在 NACT 层等待 `sendToPeer()`。异步接纳失败会报告 `nacp:internal:route:error`，并结算对应等待方；断连宽限期间的消息仍可等待重连。
 
 返回 `false` 表示消息因发给自己、没有路由、发送失败或容量限制而未被接纳。
 

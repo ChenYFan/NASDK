@@ -1,8 +1,3 @@
-/**
- * NACEB Event layer — EventInstance.
- * implements EventInterface: the instance IS the event data, not a wrapper around it.
- */
-
 import { EVENT_TRANSITIONS, cap, isBlocked, BUILTIN_NAMES } from '../types.ts'
 import type { EventStatus, EventInterface, EventHooks, NormalSignal, HookFn, TransitionFunc } from '../types.ts'
 import type { EventFSMController } from '../controller/EventFSMController.ts'
@@ -10,7 +5,6 @@ import type { PipelineInstance } from './PipelineInstance.ts'
 import { VetoT } from '../errors.ts'
 
 export class EventInstance implements EventInterface {
-  // ---- EventInterface fields (runtime-frozen via defineProperty) ----
   readonly id!: string
   name!: string
   pipelineName!: string
@@ -19,7 +13,6 @@ export class EventInstance implements EventInterface {
   blockedBy?: string[]
   parentId?: string
 
-  // ---- runtime fields ----
   readonly bypassConsume: boolean
   status: EventStatus = 'idle'
   final?: unknown
@@ -59,14 +52,9 @@ export class EventInstance implements EventInterface {
   beforeTFailure(fn: HookFn<EventInstance>) { return this.on('beforeTFailure', fn) }
   afterTFailure(fn: HookFn<EventInstance>) { return this.on('afterTFailure', fn) }
 
-  /**
-   * Transition primitive, the only beforeT-hook entry. Order: beforeT hook → funcs → status → afterT hook.
-   * If beforeT throws:
-   *   - VetoT non-terminal → warning + stay + false (hook mutated a gate; next beat re-decides).
-   *   - VetoT terminal (done/failure) → NOT vetoable: warn + proceed.
-   *   - Any other throw (hook bug) → crash-chain: forceCleanEventUnderLayer → delete beforeTFailure if
-   *     target was failure (break recursion) → recursive _transition('failure') → false.
-   */
+  // Order: beforeT hook → funcs → status → afterT hook. VetoT on non-terminal stays put
+  // (retried next beat); terminal is NOT vetoable; any other throw is a hook bug →
+  // forceCleanEventUnderLayer → recursive _transition('failure').
   async _transition(to: EventStatus, funcs?: TransitionFunc[]): Promise<boolean> {
     const same = this.status === to
     if (!same && to !== 'failure' && !EVENT_TRANSITIONS[this.status].includes(to))
@@ -76,7 +64,6 @@ export class EventInstance implements EventInterface {
       await this.ctrl.ref.THookHandler('event', to, 'before', this.id, this, this.hooks.get(`beforeT${c}`))
     } catch (err) {
       if (err instanceof VetoT) {
-        // Terminal is not vetoable; downgrade to warning and proceed.
         const terminal = to === 'done' || to === 'failure'
         this.ctrl.ref.emit('warning', this.id, {
           layer: 'event', id: this.id,
@@ -85,9 +72,8 @@ export class EventInstance implements EventInterface {
             : `beforeT${c} vetoed → stay ${this.status}: ${err.message}`,
           opt: { reason: terminal ? `beforeT${c}-veto-ignored-terminal` : `beforeT${c}-vetoed`, veto: err.message },
         })
-        if (!terminal) return false   // non-terminal: stay, retried next beat
+        if (!terminal) return false
       } else {
-        // hook bug → crash chain
         const msg = (err as any)?.message ?? String(err)
         this.ctrl.ref.emit('error', this.id, { layer: 'event', id: this.id, msg: `beforeT${c} hook threw (not VetoT) → forceCleanEventUnderLayer + event failure: ${msg}`, opt: { at: `beforeT${c}`, error: msg } })
         await this.ctrl.ref.forceCleanEventUnderLayer(this.id)
@@ -104,15 +90,14 @@ export class EventInstance implements EventInterface {
 
   async start(): Promise<void> {
     if (this.status !== 'idle') return
-    // idle→blocked/queue is the only externally-driven transition; ensureClock required (idle doesn't hold the clock).
+    // idle doesn't hold the clock, so ensureClock is required here.
     await this._transition(isBlocked(this.blockedBy ?? []) ? 'blocked' : 'queue')
     this.ctrl.ref.ensureClock()
     this.ctrl.ref.alertTick('start')
   }
 
-  /** External command: pause. Top-down and all-or-nothing: if the pipeline didn't stop, roll back to
-   *  processing/pending or follow its terminal — never leave "event paused but pipeline failed".
-   *  Builtin $ tasks cannot be paused. */
+  // Top-down, all-or-nothing: if the pipeline didn't stop, roll back — never leave
+  // "event paused but pipeline failed". Builtin $ tasks cannot be paused.
   async pause(): Promise<boolean> {
     const p = this.getPipeline()
     const t = p?.getTask()
@@ -136,8 +121,7 @@ export class EventInstance implements EventInterface {
     return true
   }
 
-  /** External command: resume. Bottom-up first (pipeline._resume → task._restart), then align self to the
-   *  task kind; ensureClock needed since paused doesn't hold the clock. */
+  // Bottom-up first, then align self to the task kind; paused doesn't hold the clock.
   async resume(): Promise<boolean> {
     const p = this.getPipeline()
     if (p && !(await p._resume())) {
@@ -147,7 +131,7 @@ export class EventInstance implements EventInterface {
     const kind = this.ctrl.ref.pipelineController().getCurrentTaskKind(this.id)
     const ok = kind === 'blocked' ? await this._transition('processing')
       : kind === 'async' ? await this._transition('pending')
-        : true   // 无当前 task，无需对齐
+        : true
     if (!ok) this.ctrl.ref.emit('warning', this.id, { layer: 'event', id: this.id, msg: `resume 未完成 event 对齐（被 veto 或已崩 failure），可重新推进`, opt: { op: 'resume' } })
     else { this.ctrl.ref.ensureClock(); this.ctrl.ref.alertTick('resume') }
     return ok

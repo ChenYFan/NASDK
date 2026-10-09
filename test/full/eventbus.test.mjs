@@ -1,14 +1,10 @@
-/**
- * full/eventbus — 覆盖 EventBus 正常会走到的路径。
- *
- * simple/eventbus 是用例，这里是覆盖：通配符的各种位置、订阅生命周期、错误隔离、readonly 边界。
- */
+// Coverage beyond simple/eventbus: wildcard positions, subscription lifecycle, error isolation, readonly.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventBus, readonlyView } from '../../EventBus.ts'
 
-// ── 匹配规则 ──
+// ── matching ──
 
 test('通配符可以在任意段，也可以多个', () => {
   const bus = new EventBus()
@@ -33,9 +29,9 @@ test('段数必须相等 —— * 不跨段、不匹配空', () => {
   bus.listen('a:*', (_p, k) => got.push(k))
 
   bus.emit('a:b', {})
-  bus.emit('a:b:c', {})     // 三段，不匹配两段的模式
-  bus.emit('a', {})         // 一段
-  bus.emit('a:', {})        // 两段，第二段是空串 —— 仍然算一段
+  bus.emit('a:b:c', {})
+  bus.emit('a', {})
+  bus.emit('a:', {})        // empty segment still counts as a segment
 
   assert.deepEqual(got, ['a:b', 'a:'])
 })
@@ -55,9 +51,9 @@ test('没有 ** 多段匹配 —— ** 只是一个普通的字面段', () => {
   const got = []
   bus.listen('a:**', (_p, k) => got.push(k))
 
-  bus.emit('a:b:c', {})     // 想当然的「** 跨段」并不成立
-  bus.emit('a:b', {})       // 段数对，但 ** 不是 *，不匹配任意值
-  bus.emit('a:**', {})      // 字面相等，这才命中
+  bus.emit('a:b:c', {})
+  bus.emit('a:b', {})
+  bus.emit('a:**', {})      // literal match only
 
   assert.deepEqual(got, ['a:**'], '** 没有任何特殊含义，就是两个星号字符')
 })
@@ -67,7 +63,7 @@ test('没有匹配的订阅时 emit 是安全空操作', () => {
   assert.doesNotThrow(() => bus.emit('nobody:listening', { x: 1 }))
 })
 
-// ── 订阅生命周期 ──
+// ── subscription lifecycle ──
 
 test('同一个函数注册多次是多个独立订阅', () => {
   const bus = new EventBus()
@@ -88,7 +84,7 @@ test('同一个函数注册多次是多个独立订阅', () => {
 test('listenOnce 在 emit 期间就被摘掉，不会自触发', () => {
   const bus = new EventBus()
   let n = 0
-  bus.listenOnce('loop', () => { n++; bus.emit('loop', {}) })   // 回调里再 emit 同一个 key
+  bus.listenOnce('loop', () => { n++; bus.emit('loop', {}) })   // re-emit same key inside callback
   bus.emit('loop', {})
   assert.equal(n, 1, '不会无限递归')
 })
@@ -140,7 +136,7 @@ test('hitKey 就是 emit 的那个 key，精确订阅时等于模式本身', () 
   assert.deepEqual(seen, ['exact:name', 'exact:name'])
 })
 
-// ── 错误隔离 ──
+// ── error isolation ──
 
 test('一个 listener 抛错不挡后面的 —— 这是不用 EventEmitter 的理由', () => {
   const bus = new EventBus()
@@ -199,7 +195,7 @@ test('asyncListenOnce：cb 的返回值决定 resolve 值，抛出则 reject', a
   const bus = new EventBus()
 
   setTimeout(() => bus.emit('a', { v: 1 }, { status: 'done' }), 5)
-  // cb 的 this 是 emit 侧的 thisArg，返回值成为 promise 的结果
+  // cb this is the emit-side thisArg; its return value resolves the promise
   assert.equal(await bus.asyncListenOnce('a', function () { return this.status }), 'done')
 
   setTimeout(() => bus.emit('b', {}), 5)
@@ -208,7 +204,7 @@ test('asyncListenOnce：cb 的返回值决定 resolve 值，抛出则 reject', a
     /await 的观测者/,
   )
 
-  // cb 返回一个 rejected promise 和同步 throw 等价 —— 都 reject 调用方，都不进 onError
+  // rejected promise from cb equals a sync throw: rejects the caller, never hits onError
   const errs = []
   bus.onError = (_k, e) => errs.push(e.message)
   setTimeout(() => bus.emit('b2', {}), 5)
@@ -270,8 +266,7 @@ test('readonlyView：读透传、方法可调、写抛错', () => {
 })
 
 test('readonlyView 是浅的：嵌套对象和方法副作用都照常生效', () => {
-  // 文档把这三条写成明确的「不保护」，所以要有测试钉住 —— 哪天谁加了深冻结，
-  // 上面那条测试会照样绿，只有这条会红，提醒他文档得跟着改。
+  // Pinned by docs as deliberately shallow: deep-freezing would break this test and require doc changes.
   const target = {
     status: 'running',
     state: { count: 0 },
@@ -323,12 +318,11 @@ test('readonly 的 off 能取消通过它建的订阅', () => {
   assert.equal(n, 1)
 })
 
-// ── 规模 ──
+// ── scale ──
 
 test('大量订阅：派发只遍历不同的通配符形状，不是全表', () => {
   const bus = new EventBus()
   let n = 0
-  // 1000 个精确订阅散布在不同 key 上
   for (let i = 0; i < 1000; i++) bus.listen(`k:${i}`, () => n++)
   bus.emit('k:500', {})
   assert.equal(n, 1, '只有命中的那个触发')

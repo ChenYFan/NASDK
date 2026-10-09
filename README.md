@@ -21,7 +21,7 @@ Nyirusu Application Software Development Kit 是一款全双工通信协议与�
 需要 Node.js 20+。
 
 ```bash
-npm install @chenyfan/nasdk
+npm install @nyirusu/nasdk
 ```
 
 ## 文档

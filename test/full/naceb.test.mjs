@@ -1,9 +1,4 @@
-/**
- * full/naceb — 覆盖 NACEB 正常会走到的路径。
- *
- * simple/naceb 是用例，这里是覆盖：注册表、状态机、资源竞争、Hook/Veto、SubEvent、观测面、adaptor。
- * 不走网络。
- */
+// Coverage beyond simple/naceb: registry, state machine, busy keys, Hook/Veto, SubEvent, observability, adaptor. No network.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -12,7 +7,7 @@ import {
 } from '../../NACEB/index.ts'
 import { collect, sleep } from '../_kit.mjs'
 
-// ── 局部 handler：每个测试自带，避免共享状态 ──
+// ── local handlers: per-test, no shared state ──
 
 class Ret extends TaskHandler {
   name = 'ret'
@@ -69,7 +64,7 @@ class Cpu extends TaskHandler {
   }
 }
 
-/** 跑 payload.task 一次就终结。 */
+/** Run payload.task once, then terminate. */
 class One extends PipelineHandler {
   name = 'one'
   description = '一步'
@@ -93,7 +88,7 @@ const build = (extra = {}) => new NACEB({
   eventAlias: [{ eventName: 'go', pipelineName: 'one', description: '跑一步' }, ...(extra.alias ?? [])],
 })
 
-// ── 注册 ──
+// ── register ──
 
 test('三种注册口都能后补', async () => {
   const naceb = new NACEB({ pipelineHandlers: [], taskHandlers: [] })
@@ -126,7 +121,7 @@ test('内建 task 名是保留的', () => {
   assert.equal(TERMINAL, '$terminal')
 })
 
-// ── 正常跑通 ──
+// ── happy path ──
 
 test('过程流条数由 handler 决定，terminal 只有一条 response', async () => {
   const naceb = build()
@@ -160,7 +155,7 @@ test('event payload 在 pipeline 里通过 this.event.payload 拿到', async () 
   assert.equal(out.result.marker, 'FROM_PAYLOAD', 'One 把整个 event.payload 当 task input 传下去')
 })
 
-// ── 失败 ──
+// ── failure ──
 
 test('task 抛 → isOk=false，原因在 payload 而非 whyNotOk', async () => {
   const naceb = build()
@@ -211,7 +206,7 @@ test('一个 event 失败不影响后续 event', async () => {
   assert.equal((await push(naceb, 'go', { task: 'ret', v: 1 })).isOk, true)
 })
 
-// ── 资源竞争 ──
+// ── busy keys ──
 
 test('同一把 busyKey 串行，不同 key 并行', async () => {
   const naceb = build()
@@ -220,7 +215,7 @@ test('同一把 busyKey 串行，不同 key 并行', async () => {
   await Promise.all([1, 2, 3].map(() => push(naceb, 'go', { task: 'gpu', ms: 20, stats })))
   assert.equal(stats.peak, 1, `同 key 峰值必须是 1，实得 ${stats.peak}`)
 
-  // gpu 和 cpu 是两把不同的 key —— 它们之间不该互相阻塞
+  // gpu and cpu are different keys — they must not block each other
   const s2 = { now: 0, peak: 0, bothNow: 0, bothPeak: 0 }
   const t0 = performance.now()
   await Promise.all([
@@ -248,7 +243,7 @@ test('占用在 task 失败后也会释放', async () => {
   const naceb = build({ tasks: [new GpuThrow()] })
 
   assert.equal((await push(naceb, 'go', { task: 'gpuThrow' })).isOk, false)
-  // 如果没释放，下面这个会永远等
+  // if not released, the push below would hang forever
   const stats = { now: 0, peak: 0 }
   const out = await push(naceb, 'go', { task: 'gpu', ms: 5, stats })
   assert.equal(out.isOk, true, 'gpu 锁已释放')
@@ -277,7 +272,7 @@ test('实例上的 afterTxxx 可以链式挂多个，按序执行', async () => 
   ev.afterTDone(() => order.push('first')).afterTDone(() => order.push('second'))
   await sleep(80)
   assert.deepEqual(order, ['first', 'second'])
-  naceb.consumeEvent(id)   // 必须收尾：终态事件留在队列里会让 NACEB 的时钟一直转
+  naceb.consumeEvent(id)   // terminal events must be consumed or NACEB's clock keeps the process alive
 })
 
 test('beforeT hook 抛「非 VetoT」= hook bug，走崩溃链落 failure', async () => {
@@ -287,8 +282,7 @@ test('beforeT hook 抛「非 VetoT」= hook bug，走崩溃链落 failure', asyn
     { hooks: { beforeTDone() { throw new Error('不许 done') } }, bypassIdle: true },
   )
   await sleep(80)
-  // 这里抛的是普通 Error，不是 VetoT —— NACEB 按类型区分，普通抛出一律当 hook bug：
-  // 清下层活孤儿 + 落 failure。所以终态是 failure 而不是 done，也不是「留在原态」。
+  // plain Error ≠ VetoT: any non-Veto throw is a hook bug — orphan cleanup + failure, not "stay".
   assert.equal(naceb.getEvent(id)?.status, 'failure')
   naceb.consumeEvent(id)
 })
@@ -301,7 +295,7 @@ test('VetoT 在 event 非终局点：留原态、下拍重试，最终仍能跑�
   const id = naceb.pushEvent(
     { name: 'go', payload: { task: 'ret', v: 1 } },
     {
-      // activating 是非终局态，可以否决。否决两拍后放行 —— 收敛条件由 hook 自己制造。
+      // activating is non-terminal and vetoable; the hook makes its own convergence condition.
       hooks: { beforeTActivating() { if (++vetoed <= 2) throw new VetoT(`第 ${vetoed} 次不放`) } },
       bypassIdle: true,
     },
@@ -332,8 +326,7 @@ test('VetoT 在 event 终局点不可否决：降级 warning 后照常放行', a
   await sleep(150)
   warns.stop()
 
-  // 终局既成事实，没有任何可篡改的条件能让它「不再是终局」。若允许否决，下拍会读到同一个终局
-  // pipeline 再被否决，而 veto 出口会立刻补拍 —— 0 延迟死循环，且 pipeline 永不被消费。
+  // Terminal is fait accompli: allowing a veto here would loop 0-delay (veto re-tick reads same terminal).
   assert.equal(naceb.getEvent(id)?.status, 'done', '照常落 done')
   assert.equal(tries, 1, '只进一次 —— 放行了就不会再有下一拍来重试')
 
@@ -351,8 +344,7 @@ test('VetoT 在 task 的 beforeTRunning：task 唯一可 veto 点', async () => 
 
   const id = naceb.pushEvent({ name: 'go', payload: { task: 'ret', v: 1 } }, { bypassIdle: false })
   const ev = naceb.getEvent(id)
-  // task 实例最早在 event 的 afterTPending 才存在：afterTActivating 时 pipeline 有了但 task 还没建。
-  // （ret 是 async task 走 pending；blocked task 对应的是 afterTProcessing。）
+  // task instances exist only from afterTPending on: afterTActivating has pipeline but no task yet.
   ev.afterTPending(function () {
     const t = this.getPipeline()?.getTask()
     if (t && !t.__hooked) {
@@ -391,8 +383,7 @@ test('afterT hook 抛异常只报 runtime error，不改变状态', async () => 
 
 // ── pause / resume ──
 
-/** 协作式取消的 task：轮询 abortSignal。NACEB 的 _stop 靠 abort 让 execute 自己退出，
- *  不看 abortSignal 的 handler 会让 pause 一直等到 stopTimeoutMs（120s）—— 那是 edge 层的事。 */
+/** Cooperative task polling abortSignal. Handlers ignoring abortSignal stall pause until stopTimeoutMs. */
 class Coop extends TaskHandler {
   name = 'coop'
   description = '协作式：可被 abort 打断，也可被外部放行'
@@ -420,11 +411,11 @@ test('pause：三层一起停，task 被 abort 成 stopped', async () => {
   assert.equal(ev.getPipeline().status, 'paused', 'pipeline 跟着停')
   assert.equal(ev.getPipeline().getTask().status, 'stopped', 'task 被 abort 掉，不是 running')
 
-  // paused 是时钟豁免态：不撑时钟，也不会有谁替它往前推
+  // paused is clock-exempt: nothing keeps ticking or advances it
   await sleep(60)
   assert.equal(ev.status, 'paused', '停住就是真停住，不会自己醒')
 
-  payload.done = true                    // 放行条件先摆好，证明 paused 期间不会被读到
+  payload.done = true                    // set release flag; proves paused task cannot read it
   await sleep(40)
   assert.equal(ev.status, 'paused', 'paused 期间 task 根本没在跑，放行条件也不生效')
 
@@ -444,7 +435,7 @@ test('resume：自顶向下对齐，event 回到 task 类型对应的态', async
   await ev.pause()
   assert.equal(await ev.resume(), true)
 
-  // coop 是 async task → event 对齐回 pending（blocked task 才是 processing）
+  // coop is async task → event realigns to pending (blocked tasks would go to processing)
   assert.equal(ev.status, 'pending')
   assert.equal(ev.getPipeline().status, 'running')
   assert.equal(ev.getPipeline().getTask().status, 'running', 'task 重新点火')
@@ -455,8 +446,7 @@ test('resume：自顶向下对齐，event 回到 task 类型对应的态', async
 })
 
 test('pause 期间禁止 builtin：$ task 跑着时 pause 硬拒绝', async () => {
-  // 内建 task 正在等子事件 / 生成子事件时停它，会让父子两边错位（paused 是时钟豁免态，
-  // 没人替父收终局）。所以这里是抛错的硬拒绝，不是返 false 的软失败。
+  // Pausing a builtin waiting on a child event desyncs parent and child, so it throws (hard reject).
   class WaitPipe extends PipelineHandler {
     name = 'waitPipe'
     description = '等一个子事件'
@@ -473,9 +463,9 @@ test('pause 期间禁止 builtin：$ task 跑着时 pause 硬拒绝', async () =
   const id = naceb.pushEvent({ name: 'waiter', payload: {} }, { bypassIdle: false })
   const ev = naceb.getEvent(id)
 
-  // 在 hook 窗口里断言，不去外面「抓时机」：内建 task 在跑的那段是竞态的（子事件 done 一开始就是
-  // true，父可能在轮询的第一拍之前就跑完了，那时 getPipeline() 已经是 null）。event 的
-  // afterTPending 恰好是 task 已建好、还没结束的一刻。
+  // Assert inside the hook window, not by "catching a moment": the builtin-task span is racy
+  // (parent may finish before first tick, getPipeline() then null). afterTPending is the exact
+  // moment where the task exists and has not finished.
   let observed = null, pauseErr = null
   ev.afterTPending(async function () {
     const t = this.getPipeline()?.getTask()
@@ -491,7 +481,7 @@ test('pause 期间禁止 builtin：$ task 跑着时 pause 硬拒绝', async () =
     assert.match(String(pauseErr), /cannot pause/, '内建 task 跑着时 pause 抛错，不是返 false')
     assert.equal(naceb.getEvent(id)?.status, 'done', '被拒的 pause 没有伤到事件，它照常跑完了')
   } finally {
-    // 断言成败都要收尾：终态事件留在队列里会让 NACEB 的时钟一直转，进程就不退出了。
+    // consume terminal events regardless of assertion outcome, or the process never exits
     const e = naceb.getEvent(id)
     if (e && (e.status === 'done' || e.status === 'failure')) naceb.consumeEvent(id)
   }
@@ -523,10 +513,10 @@ test('getEvent 未知 id 返 null；consumeEvent 未知 id 抛（刻意：防止
 
 test('consumeEvent 非终态也抛', () => {
   const naceb = build()
-  const id = naceb.pushEvent({ name: 'go', payload: { task: 'ret', v: 1 } })   // 不 bypassIdle → 停在 idle
+  const id = naceb.pushEvent({ name: 'go', payload: { task: 'ret', v: 1 } })   // no bypassIdle → stays idle
   assert.equal(naceb.getEvent(id).status, 'idle', 'pushEvent 默认停在 idle，等外部放行')
   assert.throws(() => naceb.consumeEvent(id), /non-terminal/)
-  // idle 是 tick 豁免态，不撑时钟，所以留着它不会让进程活着
+  // idle is tick-exempt: leaving it unconsumed keeps the process alive-free
 })
 
 test('状态走过 idle → … → done，可从 T 事件观测到', async () => {
@@ -553,13 +543,11 @@ test('失败路径的终态是 failure', async () => {
 })
 
 // ── SubEvent ──
-
-// ── SubEvent ──
 //
-// 两个内建 task 都取 { pipelineName, payload }，各自 push 一个独立子 Event：
-//   $fire4SubEvent — 派发完立刻返回 { childId }，不等（并发用）
-//   $wait4SubEvent — 派发完阻塞等它跑完，把子事件的结果当自己的结果返回
-// 子 Event 和普通 Event 是同一等公民，只多带一个 parentId。
+// Both builtins take { pipelineName, payload } and push an independent child Event:
+//   $fire4SubEvent — returns { childId } immediately (concurrent use)
+//   $wait4SubEvent — blocks until the child finishes, returning its result
+// Child Events are first-class, just carrying a parentId.
 
 test('$wait4SubEvent：等子事件跑完，拿它的结果', async () => {
   class Waiter extends PipelineHandler {
@@ -606,7 +594,7 @@ test('子事件带 parentId，和普通事件一样是一等公民', async () =>
   const naceb = build({ pipelines: [new Firer2()], alias: [{ eventName: 'f2', pipelineName: 'firer2', description: 'x' }] })
   const out = await push(naceb, 'f2', {})
   const child = naceb.getEvent(out.result.childId)
-  // fire 的子事件默认 bypassConsume，所以跑完不会留在队列里等人取
+  // fired children default to bypassConsume: they don't stay in the queue when done
   assert.ok(child === null || child.parentId, '子事件要么已自行清理，要么带着 parentId')
 })
 
@@ -659,7 +647,7 @@ test('嵌套：子事件里再起一个子事件', async () => {
   assert.deepEqual(out.result, { nested: 'deep' }, '三层穿透')
 })
 
-// ── 观测面 ──
+// ── observability ──
 
 test('T 事件三层都有：event / pipeline / task', async () => {
   const naceb = build()
@@ -726,8 +714,7 @@ test('eventBusObs 只读', () => {
 
 // ── adaptor ──
 
-test('adaptor 满足 Processor 契约（event 侧没有 register）', () => {
-  const a = build().nacpAdaptor
+test('adaptor 满足 Processor 契约（event 侧没有 register）', () => {  const a = build().nacpAdaptor
   assert.equal(typeof a.list, 'function')
   assert.equal(typeof a.push, 'function')
   assert.equal(a.register, undefined, 'event 侧不需要 register')

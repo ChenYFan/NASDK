@@ -32,7 +32,7 @@ NACAB
 ## 使用
 
 ```ts
-import { NACAB, AbilityHandler } from '@chenyfan/nasdk/NACAB'
+import { NACAB, AbilityHandler } from '@nyirusu/nasdk/NACAB'
 
 class Add extends AbilityHandler<number> {
   readonly name = 'math.add'

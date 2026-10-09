@@ -1,13 +1,5 @@
-/**
- * simple/napp — 联测：两个 App、两个进程，跑通主流程。
- *
- * simple 里唯一起真网络的文件（其余五个是各层单测）。读这个文件学 NASDK 怎么用。
- *
- * 服务端在 ./_server.mjs，由 fork 起在独立进程里 —— 两个 App 本来就该分处两个进程，同进程扮演两端会让
- * 测试写出真实部署下不可能的操作（直接 emit 到对端的 bus）。
- *
- *   node --import tsx --test test/simple/napp.test.mjs
- */
+// Two real processes run the full NASDK flow over real networks.
+// Same-process both-sides would allow poking the peer's bus directly, impossible in real deployment.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -19,7 +11,7 @@ import TCPClientProvider from '../../packages/nact-tcp-client/index.ts'
 import UnixClientProvider from '../../packages/nact-unix-client/index.ts'
 import WebSocketClientProvider from '../../packages/nact-websocket-client/index.ts'
 
-const SERVER = fileURLToPath(new URL('./_server.mjs', import.meta.url))
+const SERVER = fileURLToPath(new URL('../_kit.mjs', import.meta.url))
 const PORT = 18900
 const clientProviders = {
   tcp: () => new TCPClientProvider(),
@@ -27,9 +19,9 @@ const clientProviders = {
   websocket: () => new WebSocketClientProvider(),
 }
 
-/** 起服务端子进程，等它 ready。返回子进程句柄 + 一个 ask()（请它做事并等回话）。 */
+/** Fork server child, wait for ready, return handle with ask(). */
 async function startServer(specs) {
-  const child = fork(SERVER, [JSON.stringify(specs)], {
+  const child = fork(SERVER, ['--test-peer', 'simple', JSON.stringify(specs)], {
     stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
   })
   await new Promise((resolve, reject) => {
@@ -39,7 +31,7 @@ async function startServer(specs) {
   })
   return {
     child,
-    /** 请对端在它自己的 bus 上 emit —— 真实拓扑下只能这样，不能从外部戳它的 bus。 */
+    /** Ask the peer to emit on its own bus; a real topology offers no other way. */
     emit: (key, payload) => child.send({ cmd: 'emit', key, payload }),
     ask: (cmd) => new Promise((r) => { child.once('message', r); child.send({ cmd }) }),
     stop: async () => {
@@ -54,7 +46,7 @@ test('simple/napp：一次完整往返', async (t) => {
   const clientSpec = { type: 'tcp', provider: { host: '127.0.0.1', port: PORT } }
   const server = await startServer([serverSpec])
 
-  // 客户端不写 server[]，但同样要 start()
+  // client omits server[] but still must start()
   const client = new NApp({ id: 'web' })
   client.nact.use(new TCPClientProvider())
   await client.start()
@@ -89,17 +81,17 @@ test('simple/napp：一次完整往返', async (t) => {
 
   await t.test('subscribe：远程订阅对端的 bus', async () => {
     const { subId, response, stream } = client.subscribe('core', 'demo:*')
-    const res = await response                 // 等对端确认订阅已建立
+    const res = await response                 // wait for subscribe confirmation
     assert.equal(res.meta.isOk, true)
     assert.equal(res.payload.targetSubId, subId)
 
-    server.emit('demo:hello', { n: 1 })        // 请对端自己发
+    server.emit('demo:hello', { n: 1 })        // ask peer to emit on its own bus
     server.emit('demo:world', { n: 2 })
 
     const got = []
     for await (const message of stream) {
       got.push(message.payload.n)
-      if (got.length === 2) break              // break == 主动退订
+      if (got.length === 2) break              // break == unsubscribe
     }
     assert.deepEqual(got, [1, 2])
   })
@@ -111,7 +103,7 @@ test('simple/napp：一次完整往返', async (t) => {
     assert.deepEqual(client.listConnectedApp(), ['core'])
   })
 
-  await client.terminate()                     // terminate 是 start 的反面
+  await client.terminate()
   await server.stop()
 })
 

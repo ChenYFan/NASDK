@@ -11,7 +11,7 @@ NACP 生命周期分为 `NApp 链路生命周期`和`消息生命周期`。
 ```mermaid
 stateDiagram-v2
     [*] --> online: Reg 成功
-    online --> offline: 断连 / ACK超时
+    online --> offline: 断连 / ACK超时 / 心跳无应答
     offline --> online: 宽限期内 Reg
     offline --> dropped: 宽限期结束
     online --> dropped: 收到 UnReg
@@ -28,7 +28,7 @@ stateDiagram-v2
 
 Register 握手成功后，NACP 建立 App ID 与 NACT Peer 的绑定，App 进入 `online`。
 
-发往该 App 的消息会先进入 `积压表Backlog`，再立即尝试提交给对应 Peer。
+发往该 App 的消息会先进入 `积压表Backlog`，再立即尝试提交给对应 Peer。提交后等待 Provider 接纳确认；接纳完成后，可靠消息才开始 ACK 超时计时。
 
 :::tip
 正常情况下 Backlog 只是出站通道，不会长期持有消息。
@@ -40,11 +40,13 @@ Register 握手成功后，NACP 建立 App ID 与 NACT Peer 的绑定，App 进�
 
 - 承载该 NApp 的 NACT Peer 断开。
 - 发往该 NApp 的可靠消息超过 `ackTimeoutMs` 仍未收到 ACK。
+- NApp 在下一心跳周期到达时，发现上一条心跳仍未收到 Response。
 
 进入 `offline` 时，NACP 会：
 
 - 保留 App ID、请求等待方和订阅记录，包括 AutoSubscribe。
 - 将已经发出但尚未收到 ACK 的消息移回 Backlog 队首。
+- 将仍在等待本端 Provider 接纳的消息放回 Backlog，等待重连后重新提交。
 - 启动 `reconnectGraceMs` 宽限计时。
 - 将后续出站消息继续加入 Backlog。
 
@@ -52,9 +54,15 @@ Register 握手成功后，NACP 建立 App ID 与 NACT Peer 的绑定，App 进�
 注意区分 ACK 超时和 Req 超时。前者用于判断链路可达性，不是 Request 的业务处理时限。
 :::
 
+:::tip
+空闲链路没有业务消息时，NApp 也会周期性发送 `NApp.heartbeat`。它既会触发正常的 ACK 检查，也会在下一周期检查对应 Response。离线后只结束这条心跳自己的等待，普通业务请求继续保留在宽限期内。周期与关闭方式见 [NAppOpts](/napp/construction)。
+:::
+
 ### Re-online
 
 同一 App ID 在宽限期内重新完成 Register 后，NACP 会取消宽限计时，并按 Backlog 中的原始顺序补发消息。
+
+应用层心跳在离线时已被清理，重新注册后由 NApp 发起新的探测。
 
 :::warning
 可靠消息可能因此被重复发送，接收方会再次回复 ACK，但在去重记录有效期间不会重复处理。
@@ -69,13 +77,13 @@ Register 握手成功后，NACP 建立 App ID 与 NACT Peer 的绑定，App 进�
 
 进入 `dropped` 后，NACP 会彻底清理该 App 的协议状态：
 
-- 放弃 Backlog 和 ACK 等待表中的消息，并以 `false` 结算对应发送等待方。
+- 放弃 Backlog、提交中和 ACK 等待表中的消息，并以 `false` 结算对应发送等待方。
 - reject 仍在等待 Response 的调用。
 - 移除 SubscribeTable 与 ListenTable 中属于该 App 的记录。
 - 结束显式订阅与 AutoSubscribe 的本地监听。
 - 删除该 App 的入站去重记录和链路绑定。
 
-Unregister 表示对端明确离开，因此不会经过 `offline` 或等待宽限期。
+Unregister 表示对端明确离开。本端先将回复交给 Provider 接纳，再清理状态并关闭连接，不等待 ACK 或重连宽限期。
 
 ## 消息生命周期
 
@@ -86,7 +94,11 @@ Request、Response、Signal、Register、Unregister、Subscribe 和 Unsubscribe 
 ```mermaid
 stateDiagram-v2
     [*] --> backlog: NACP 接收消息
-    backlog --> ackPending: 目标在线，提交给 NACT
+    backlog --> accepting: 向 NACT 提交
+    accepting --> ackPending: 本端 Provider 接纳完成
+    accepting --> completed: 接纳确认前已收到 ACK
+    accepting --> backlog: 链路离线
+    accepting --> failed: 接纳失败 / 放弃
     ackPending --> completed: 收到 ACK
     ackPending --> backlog: 链路离线
     backlog --> failed: 逐出 / App dropped
@@ -95,7 +107,7 @@ stateDiagram-v2
     failed --> [*]
 ```
 
-`BacklogTable 积压表` 保存尚未出线或等待重发的消息，`AckPendingTable确认表` 保存已经提交给 NACT、正在等待 ACK 的消息。
+`BacklogTable 积压表` 保存尚未提交或等待重发的消息。提交后、Provider 接纳确认前的记录单独跟踪，不再占用 Backlog；`AckPendingTable确认表` 保存已被 Provider 接纳、正在等待 ACK 的消息。
 
 ### Notify与AckMessage
 
@@ -104,7 +116,7 @@ Notify 和 Ack 不等待 ACK，也不进入 AckPendingTable：
 ```mermaid
 stateDiagram-v2
     [*] --> backlog: NACP 接收消息
-    backlog --> completed: 目标在线，提交给 NACT
+    backlog --> completed: 本端 Provider 接纳完成
     backlog --> waiting: 目标离线
     waiting --> completed: 重连后成功发出
     backlog --> failed: 容量拒绝 / 逐出
@@ -137,7 +149,7 @@ NACP区分`消息已接收`和`消息已处理`两个行为。
 | `register` / `unregister`   | 10 秒             |
 | `subscribe` / `unsubscribe` | 10 秒             |
 
-只要 App 仍在 `online` 或重连宽限期内，Response 等待方和 [AutoSubscribe](/transport/nacp/auto-subscribe) 都会保留。
+普通业务调用的 Response 等待方和 [AutoSubscribe](/transport/nacp/auto-subscribe) 会在 App 在线或处于重连宽限期时保留。心跳请求由 NApp 在下一周期检查应答，并在离线时结束自身等待。
 
 ## 容量限制
 

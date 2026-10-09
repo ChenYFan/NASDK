@@ -1,11 +1,5 @@
-/**
- * NACEB Task layer — TaskInstance.
- *
- * TaskHandler is stateless; execute() is called with `this` bound to the TaskInstance so
- * handler-authored state lands on the instance, never on the handler.
- * A task is one-shot: execute() runs once, then the instance is discarded.
- * State that must survive across steps goes to pCtx.state (PipelineInstance), not this.state.
- */
+// A task is one-shot: execute() runs once, then the instance is discarded.
+// Cross-step state goes to pipeline.state, not this.state.
 
 import { uid } from '../../utils/id.ts'
 import { TASK_TRANSITIONS, cap, isBlocked, BUILTIN_NAMES, TaskResponse } from '../types.ts'
@@ -14,28 +8,16 @@ import type { TaskFSMController } from '../controller/TaskFSMController.ts'
 import type { PipelineInstance } from './PipelineInstance.ts'
 import { VetoT } from '../errors.ts'
 
-/**
- * TaskInstance — the `this` of TaskHandler.execute() (symmetric with PipelineInstance: handler is always
- * stateless, state lands on the instance). Fields in three tiers; authors touch only the third:
- *
- *   identity/input (runtime-frozen, writes throw TypeError)
- *     id / name / busyKeys / input    this task's identity and input
- *     pipeline                       upstream PipelineInstance (eventId: this.pipeline.event.id)
- *   framework state (writable, but authors must NOT touch)
- *     status / result / response / error / abort — the framework rewrites these every beat. Writing status
- *     bypasses _transition and desyncs the state machine from hooks/bus.
- *   user state (the only place authors should write)
- *     state    per-task scratch. ⚠️ a task is one-shot: execute runs once, the instance is then discarded,
- *              so this.state only lives for this execute. Cross-step state goes to this.pipeline.state
- *              (which survives to the event terminal).
- */
+// Field tiers: identity/input (runtime-frozen); framework state (status/result/response/error/
+// abort — the framework rewrites these); user state (`state` — one-shot, cross-step state goes
+// to this.pipeline.state).
 export class TaskInstance {
   readonly id!: string
   readonly pipeline!: PipelineInstance
   readonly name!: string
   readonly busyKeys!: string[]
   readonly input!: unknown
-  /** This execute's state space. The reference is frozen, contents are writable. Cross-step → this.pipeline.state. */
+  // Cross-step state → this.pipeline.state.
   readonly state!: Record<string, any>
   status: TaskStatus = 'pending'
   result: { process?: unknown } = {}
@@ -80,13 +62,8 @@ export class TaskInstance {
   beforeTPending(fn: HookFn<TaskInstance>) { return this.on('beforeTPending', fn) }
   afterTPending(fn: HookFn<TaskInstance>) { return this.on('afterTPending', fn) }
 
-  /**
-   * Transition primitive, the only beforeT-hook entry. Order: beforeT hook → funcs → status → afterT hook.
-   * If beforeT throws:
-   *   - only `to === 'running'` can veto (stays pending, retried next beat); terminal states are facts.
-   *   - any other throw → hook bug: emit error → delete beforeTFailure if target was failure (break
-   *     recursion) → recursive _transition('failure') → false.
-   */
+  // Order: beforeT hook → funcs → status → afterT hook. Only `to === 'running'` can veto
+  // (stays pending, retried next beat); any other throw is a hook bug → failure.
   async _transition(to: TaskStatus, funcs?: TransitionFunc[]): Promise<boolean> {
     const same = this.status === to
     if (!same && to !== 'failure' && !TASK_TRANSITIONS[this.status].includes(to))
@@ -95,11 +72,10 @@ export class TaskInstance {
     try {
       await this.ctrl.ref.THookHandler('task', to, 'before', this.id, this, this.hooks.get(`beforeT${c}`))
     } catch (err) {
-      if (to === 'running' && err instanceof VetoT) {   // 唯一可 veto 点 → 留 pending
+      if (to === 'running' && err instanceof VetoT) {
         this.ctrl.ref.emit('warning', this.id, { layer: 'task', id: this.id, msg: `beforeTRunning vetoed → stay pending: ${err.message}`, opt: { reason: 'beforeTRunning-vetoed', veto: err.message } })
         return false
       }
-      // hook bug → layer-failure crash chain
       const msg = (err as any)?.message ?? String(err)
       this.ctrl.ref.emit('error', this.id, { layer: 'task', id: this.id, msg: `beforeT${c} hook threw (not vetoable here) → task failure: ${msg}`, opt: { at: `beforeT${c}`, error: msg } })
       if (to === 'failure') this.hooks.delete('beforeTFailure')
@@ -118,7 +94,6 @@ export class TaskInstance {
       .then(() => handler.execute.call(this))
       .then(async (result) => {
         if (this.abort.signal.aborted) await this._transition('stopped')
-        // response written as the done-transition side-effect (after beforeTDone hook).
         else await this._transition('done', [() => { this.response = new TaskResponse(result) }])
       })
       .catch(async (err) => {
@@ -136,17 +111,15 @@ export class TaskInstance {
     return result
   }
 
-  /** force=true: the force-kill path (forceCleanEventUnderLayer) — bypasses the builtin $ task refusal; tries to
-   *  stop from any state without throwing. */
+  // force=true (forceCleanEventUnderLayer) bypasses the builtin $ task refusal and never throws.
   async _stop(force = false): Promise<void> {
     if (!force && BUILTIN_NAMES.includes(this.name))
       throw new Error(`Task ${this.name} is a builtin $ task and cannot be stopped.`)
     if (this.status === 'pending') { await this._transition('stopped'); this.ctrl.ref.alertTick('task'); return }
     if (this.status === 'running') {
       await this.onSignal({ kind: 'abort' })
-      // Wait up to ctrl.stopTimeoutMs for the execute promise to settle; on timeout, stop waiting.
       if (this._donePromise) {
-        // ⚠️ must clearTimeout: Promise.race only ignores the loser, it doesn't cancel it.
+        // must clearTimeout: Promise.race only ignores the loser, it doesn't cancel it.
         let timer: ReturnType<typeof setTimeout> | undefined
         const timeout = new Promise<'timeout'>(res => { timer = setTimeout(() => res('timeout'), this.ctrl.stopTimeoutMs) })
         try {
@@ -157,12 +130,11 @@ export class TaskInstance {
       }
       return
     }
-    if (force) return   // force-kill: done/stopped/failure etc. need no further stop, pass silently (then consume)
+    if (force) return
     throw new Error(`Task ${this.id} in status ${this.status} cannot be stopped`)
   }
   async _restart(): Promise<void> {
     if (this.status !== 'stopped') throw new Error(`Task ${this.id} in status ${this.status} cannot restart (must be stopped)`)
-    // resetting abort/response/error is the pending-transition side-effect.
     await this._transition('pending', [() => {
       this.abort = new AbortController()
       this.response = undefined; this.error = undefined

@@ -5,7 +5,7 @@ AbilityProcessor处理一次调用、一次返回的Ability请求，并提供Abi
 ## 接口
 
 ```ts
-import type { AbilityProcessor } from '@chenyfan/nasdk/types'
+import type { AbilityProcessor } from '@nyirusu/nasdk/types'
 
 interface AbilityProcessor extends Processor {
   register(item: AbilityProcessorHandler): void
