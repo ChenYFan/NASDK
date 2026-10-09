@@ -16,6 +16,8 @@ import UnixClientProvider from '../packages/nact-unix-client/index.ts'
 import WebSocketServerProvider from '../packages/nact-websocket-server/index.ts'
 import WebSocketClientProvider from '../packages/nact-websocket-client/index.ts'
 import assert from 'node:assert/strict'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { setImmediate as flush } from 'node:timers/promises'
 import { packFrameHeader } from '../NACT/framing.ts'
 import HTTPClient from '../packages/nact-streamable-http-client/index.ts'
@@ -34,7 +36,7 @@ export const PORT = {
 }
 
 /** A unix socket path unique to this process AND this name, so concurrent runs never share one. */
-export const sock = (name) => `/tmp/nasdk-t-${name}-${process.pid}.sock`
+export const sock = (name) => join(tmpdir(), `nasdk-t-${name}-${process.pid}.sock`)
 
 /** `chunkSize` goes to the NACT part of the spec; everything else is the Provider's own options. */
 const spec = (type, provider, { chunkSize, ...rest }) =>
@@ -301,7 +303,7 @@ export async function providerPair(t, location, opt = {}) {
     return new Provider()
   }))
   const port = 18980 + ['tcp', 'unix', 'websocket', 'streamable-http'].indexOf(type) * 2 + (name.endsWith('-server') ? 1 : 0)
-  const path = `/tmp/opencode/nact-${process.pid}-${crypto.randomUUID()}.sock`
+  const path = join(tmpdir(), `nact-${process.pid}-${crypto.randomUUID()}.sock`)
   const serverOptions = type === 'unix' ? { path } : { host: '127.0.0.1', port, path: '/frames', idleTimeoutMs: 0 }
   const clientOptions = type === 'unix' ? { path } : type === 'tcp' ? { host: '127.0.0.1', port }
     : { url: `${type === 'websocket' ? 'ws' : 'http'}://127.0.0.1:${port}/frames`, headers: { connection: 'close' } }
