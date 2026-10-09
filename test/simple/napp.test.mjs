@@ -10,6 +10,7 @@ import NApp from '../../index.ts'
 import TCPClientProvider from '../../packages/nact-tcp-client/index.ts'
 import UnixClientProvider from '../../packages/nact-unix-client/index.ts'
 import WebSocketClientProvider from '../../packages/nact-websocket-client/index.ts'
+import { sock } from '../_kit.mjs'
 
 const SERVER = fileURLToPath(new URL('../_kit.mjs', import.meta.url))
 const PORT = 18900
@@ -118,8 +119,8 @@ test('simple/napp：一个 App 同开三种 carrier，调用写法完全一样',
       client: { type: 'websocket', provider: { url: `ws://127.0.0.1:${PORT + 2}/ws` } },
     },
     {
-      server: { type: 'unix', provider: { path: `/tmp/nasdk-simple-${process.pid}.sock` } },
-      client: { type: 'unix', provider: { path: `/tmp/nasdk-simple-${process.pid}.sock` } },
+      server: { type: 'unix', provider: { path: sock('simple') } },
+      client: { type: 'unix', provider: { path: sock('simple') } },
     },
   ]
   const server = await startServer(entries.map(entry => entry.server))
