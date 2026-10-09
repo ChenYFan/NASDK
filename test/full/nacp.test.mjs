@@ -1,19 +1,16 @@
-/**
- * full/nacp — 覆盖协议层正常会走到的路径。
- *
- * 不起 socket：假 Peer 塞进 peer 表，出站消息就落到手里；inbound 直接喂造好的消息。这样才能覆盖到
- * 一个配合的对端永远不会发出来的东西（跨大版本、未知订阅、错地址）。
- * 真网络下的联测在 full/napp。
- */
+// No sockets: fake peers let us inject messages a real peer would never send. Real network lives in full/napp.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { setImmediate as flush } from 'node:timers/promises'
+import { buildMessage } from '../../NACP/types.ts'
+import { deferred, acceptanceApp as bare, controlledChannel as controlled, acceptanceNotifyOpt as notifyOpt } from '../_kit.mjs'
 
 import { PROTOCOL_V } from '../../NACP/types.ts'
 import { NACPError } from '../../NACP/errors.ts'
 import { startBare, fakePeer, msg, registerMsg, collect, sleep } from '../_kit.mjs'
 
-/** 一个已经和 'them' 绑好的 App，最常用的起点。 */
+/** App already bound to 'them'. The most common starting point. */
 async function bound(id = 'me', { answer = true, opt } = {}) {
   const app = await startBare(id, opt)
   const { peer, sent } = fakePeer(app, 'p1', { answer })
@@ -22,7 +19,142 @@ async function bound(id = 'me', { answer = true, opt } = {}) {
   return { app, peer, sent, stop: () => app.terminate() }
 }
 
-// ── 信封构造 ──
+// ── envelope construction ──
+
+test('NACP notify 等待 Provider 接纳，接纳前不完成', async t => {
+  const gate = deferred()
+  const { app, peer } = await controlled(t, () => gate.promise, 4096)
+  app.nacp.bindAppId('them', peer.id)
+  let done = false
+  const sent = app.notify('them', notifyOpt).then(result => { done = true; return result })
+  await flush()
+  assert.equal(done, false)
+  gate.resolve()
+  assert.equal(await sent, true)
+})
+
+test('NACP 接纳失败结束 notify、signal 和 request 等待方', async t => {
+  const app = await bare(t)
+  const peer = { id: 'rejecting', async send() { throw new Error('refused') }, close() {} }
+  app.nact.addPeer(peer)
+  app.nacp.bindAppId('them', peer.id)
+  await Promise.all([
+    app.notify('them', notifyOpt).then(result => assert.equal(result, false)),
+    app.signal('them', { parentId: 'req', kind: 'normal' }).then(result => assert.equal(result, false)),
+    assert.rejects(app.request('them', { kind: 'ability', target: 'echo' }).response,
+      error => error.code === 'not-sent'),
+  ])
+  assert.equal(app.nacp.getPendingCount(), 0)
+})
+
+test('NACP ACK 超时从 Provider 接纳完成后计时', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 })
+  const app = await bare(t, { ackTimeoutMs: 20, reconnectGraceMs: 100 })
+  const gate = deferred()
+  const peer = { id: 'delayed', send: () => gate.promise, close() {} }
+  app.nact.addPeer(peer)
+  app.nacp.bindAppId('them', peer.id)
+  const response = app.response('them', { parentId: 'req', isOk: true })
+  await flush()
+  t.mock.timers.tick(100)
+  await flush()
+  assert.deepEqual(app.listConnectedApp(), ['them'], 'Provider 接纳等待不消耗 ACK 时限')
+  gate.resolve()
+  await flush()
+  t.mock.timers.tick(21)
+  await flush()
+  assert.deepEqual(app.listConnectedApp(), [])
+  t.mock.timers.tick(100)
+  await flush()
+  assert.equal(await response, false)
+})
+
+test('提前到达的 ACK 正常结算，迟到的接纳不会重新启动 ACK 等待', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 })
+  const app = await bare(t, { ackTimeoutMs: 20 })
+  const gate = deferred()
+  const peer = {
+    id: 'early-ack', close() {},
+    send(message) {
+      app.nacp.inbound(buildMessage('them', 'ack', 'me', { parentId: message.id }), peer)
+      return gate.promise
+    },
+  }
+  app.nact.addPeer(peer)
+  app.nacp.bindAppId('them', peer.id)
+  const errors = []
+  app.bus.listen('nacp:internal:ack:*', value => errors.push(value))
+  assert.equal(await app.signal('them', { parentId: 'req', kind: 'normal' }), true)
+  gate.resolve()
+  await flush()
+  t.mock.timers.tick(100)
+  await flush()
+  assert.deepEqual(app.listConnectedApp(), ['them'])
+  assert.deepEqual(errors, [])
+})
+
+test('接纳中断连后重连补发，旧接纳结果不能影响新连接', async t => {
+  const app = await bare(t)
+  const gate = deferred()
+  const first = { id: 'first', send: () => gate.promise, close() {} }
+  app.nact.addPeer(first)
+  app.nacp.bindAppId('them', first.id)
+  const delivered = app.notify('them', notifyOpt)
+  app.bus.emit('nact:peer:disconnect', { peerId: first.id })
+  const { peer, sent } = fakePeer(app, 'second')
+  app.nact.addPeer(peer)
+  app.nacp.inbound(registerMsg({ from: 'them', to: 'me' }), peer)
+  assert.equal(await delivered, true)
+  gate.resolve()
+  await flush()
+  assert.equal(sent.filter(message => message.type === 'notify').length, 1)
+  assert.equal(app.nacp.getAppPeerId('them'), peer.id)
+})
+
+test('discard 和 terminate 后，迟到的接纳不能复活 ACK 等待', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 0 })
+  const app = await bare(t, { ackTimeoutMs: 20 })
+  const gate = deferred()
+  const peer = { id: 'delayed', send: () => gate.promise, close() {} }
+  app.nact.addPeer(peer)
+  app.nacp.bindAppId('them', peer.id)
+  const request = app.request('them', { kind: 'ability', target: 'echo' })
+  const rejected = assert.rejects(request.response, error => error.code === 'discarded')
+  app.nacp.discardOutbound(request.reqId)
+  await rejected
+  const notifyDone = app.notify('them', notifyOpt)
+  app.nacp.terminate()
+  assert.equal(await notifyDone, false)
+  gate.resolve()
+  await flush()
+  const events = []
+  app.bus.listen('nacp:internal:ack:*', value => events.push(value))
+  t.mock.timers.tick(100)
+  await flush()
+  assert.equal(app.nacp.getPendingCount(), 0)
+  assert.deepEqual(events, [])
+})
+
+test('Unregister 回复被 Provider 接纳后再关闭，不等待对端 ACK', async t => {
+  const app = await bare(t)
+  const gate = deferred()
+  let closed = false
+  const peer = {
+    id: 'unregister',
+    send: message => message.type === 'response' ? gate.promise : Promise.resolve(),
+    close() { closed = true; app.nact.dropPeer(peer.id); app.bus.emit('nact:peer:disconnect', { peerId: peer.id }) },
+  }
+  app.nact.addPeer(peer)
+  app.nacp.bindAppId('them', peer.id)
+  app.nacp.inbound(buildMessage('them', 'unregister', 'me'), peer)
+  await flush()
+  assert.equal(closed, false)
+  assert.equal(app.nacp.checkAppId('them'), true)
+  gate.resolve()
+  await flush()
+  assert.equal(closed, true)
+  assert.equal(app.nacp.checkAppId('them'), false)
+})
 
 test('出站消息都能构造，v/id/t/from 一律齐全', async () => {
   const { app, sent, stop } = await bound()
@@ -52,9 +184,9 @@ test('出站消息都能构造，v/id/t/from 一律齐全', async () => {
 test('可选字段不写就不上线 —— 不是 present-and-undefined', async () => {
   const { app, sent, stop } = await bound()
 
-  app.nacp.response('them', { parentId: 'p', isOk: true })          // 不给 whyNotOk / kind
+  app.nacp.response('them', { parentId: 'p', isOk: true })          // no whyNotOk / kind given
   const ok = sent.find(m => m.type === 'response')
-  assert.ok(!('whyNotOk' in ok.meta), 'CBOR 会把显式 undefined 编成真 key，所以必须整个不写')
+  assert.ok(!('whyNotOk' in ok.meta), 'CBOR encodes explicit undefined as a real key; the field must be absent')
   assert.ok(!('kind' in ok.meta))
 
   sent.length = 0
@@ -85,7 +217,7 @@ test('四个内部族的信息在 payload，meta 是空的', async () => {
   await stop()
 })
 
-// ── 出站路由 ──
+// ── outbound routing ──
 
 test('出站三种失败各有 reason，都返 false', async () => {
   const app = await startBare('me')
@@ -94,10 +226,10 @@ test('出站三种失败各有 reason，都返 false', async () => {
   assert.equal(await app.nacp.notify('陌生人', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
   assert.equal(await app.nacp.notify('me', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
 
-  // send-failed：appId 绑到一个不在 peer 表里的 peerId
+  // send-failed: appId bound to a peerId not in the peer table
   app.nacp.bindAppId('ghost', 'peer-不存在')
   assert.equal(await app.nacp.notify('ghost', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), false)
-  // 解绑：否则 terminate 会给这个不存在的 peer 发 unregister，白等满 10s 超时
+  // unbind: else terminate sends unregister to a nonexistent peer and waits out a 10s timeout
   app.nacp.dropAppId('ghost')
 
   errs.stop()
@@ -222,7 +354,7 @@ test('register：to 不是自己就丢弃，连话都不回', async () => {
   await app.terminate()
 })
 
-// ── Gateway 槽位 ──
+// ── Gateway slot ──
 
 test('Gateway 槽位先到先得', async () => {
   const app = await startBare('me')
@@ -253,7 +385,7 @@ test('第二个 Gateway：autoMultiGatewayDowngrade=true 时降级保留', async
 })
 
 test('第二个 Gateway：默认(false)时视为组网错误，拒连', async () => {
-  const app = await startBare('me')      // autoMultiGatewayDowngrade 默认 false
+  const app = await startBare('me')      // autoMultiGatewayDowngrade defaults to false
   const { peer: p1 } = fakePeer(app, 'p1')
   const { peer: p2 } = fakePeer(app, 'p2')
   app.nact.addPeer(p1); app.nact.addPeer(p2)
@@ -278,7 +410,7 @@ test('普通 App 不动 Gateway 槽位', async () => {
   await app.terminate()
 })
 
-// ── Gateway 转发 ──
+// ── Gateway forwarding ──
 
 test('isGateway=true：to≠self 且认识目标 → 转发，且 from/to 不改写', async () => {
   const app = await startBare('gw', { isGateway: true })
@@ -288,12 +420,14 @@ test('isGateway=true：to≠self 且认识目标 → 转发，且 from/to 不改
   app.nacp.bindAppId('A', 'pa')
   app.nacp.bindAppId('B', 'pb')
   const fwd = collect(app.bus, 'nacp:internal:gateway:success')
+  const accepted = app.bus.asyncListenOnce('nacp:internal:gateway:success')
 
   const m = msg('request', { from: 'A', to: 'B', meta: { kind: 'ability', target: 't' }, payload: { v: 1 } })
   app.nacp.inbound(m, pa)
+  await accepted
 
   fwd.stop()
-  assert.deepEqual(fwd.events.map(f => f.payload.reason), ['forwarded'])
+  assert.deepEqual(fwd.events.filter(f => f.payload.msg.id === m.id).map(f => f.payload.reason), ['forwarded'])
   const relayed = sb.find(x => x.type === 'request')
   assert.equal(relayed.from, 'A', '端到端字段，逐跳不改写')
   assert.equal(relayed.to, 'B')
@@ -353,26 +487,28 @@ test('没有路由时出站兜底走 Gateway', async () => {
   app.nacp.inbound(registerMsg({ from: 'gw', to: 'me', payload: { isGateway: true } }), pg)
   sg.length = 0
 
-  // 'unknown' 没绑过，应该落到 Gateway 那条链路上
+  // 'unknown' has no binding: falls through to the Gateway link
   assert.equal(await app.nacp.notify('unknown', { parentId: 'x', targetSubName: 'a', hitSubName: 'a' }), true)
   assert.equal(sg.find(m => m.type === 'notify')?.to, 'unknown', '包原样交给 Gateway，to 不变')
   await app.terminate()
 })
 
-// ── unregister / 断连 ──
+// ── unregister / disconnect ──
 
 test('unregister 进来：先回话再清理（清理会拆掉回话用的路由）', async () => {
   const { app, peer, sent, stop } = await bound()
-  // subscribe 返回的 Promise 在清理时会 reject（订阅随对端一起没了），必须接住
+  // the subscribe promise rejects during cleanup; it must be caught
   const subAck = app.nacp.subscribe('them', 'x:*', () => {})?.catch(() => {})
   app.nacp.inbound(msg('subscribe', { from: 'them', to: 'me', id: 's1', payload: { targetSubName: 'mine:*' } }), peer)
   sent.length = 0
 
+  const dropped = app.bus.asyncListenOnce('nacp:internal:napp:success')
   app.nacp.inbound(msg('unregister', { from: 'them', to: 'me', id: 'u1' }), peer)
 
   const ack = sent.find(m => m.type === 'response')
   assert.ok(ack, '回了 ack')
   assert.equal(ack.meta.parentId, 'u1')
+  await dropped
   assert.equal(app.nacp.checkAppId('them'), false, '之后才解绑')
   await stop()
   await subAck
@@ -386,11 +522,11 @@ test('意外断连进入宽限期，协议状态与等待方保留', async () =>
   const pending = app.nacp.request('them', { kind: 'ability', target: 't' }).catch(e => e)  // PendingTable
   assert.equal(app.nacp.getListenCount(), 1)
   assert.equal(app.nacp.getSubCount(), 1)
-  // pending 表装的是「所有在等应答的出站消息」，不只是 request —— 这里 subscribe 和 request 各占一条。
-  // （假 Peer 会应答 subscribe，但那是下一个微任务，此刻还没到。）
+  // pending holds every outbound message awaiting a reply — subscribe and request each add one here.
+  // (fake peer will answer the subscribe, but only on a later microtask.)
   assert.equal(app.nacp.getPendingCount(), 2)
 
-  app.bus.emit('nact:peer:disconnect', { peerId: 'p1' })   // 物理断连
+  app.bus.emit('nact:peer:disconnect', { peerId: 'p1' })   // physical disconnect
 
   assert.equal(app.nacp.checkAppId('them'), true, '宽限期内仍记得这个 appId')
   assert.deepEqual(app.nacp.listOnlineAppId(), [], '但不再报告为在线')
@@ -531,12 +667,12 @@ test('本地 unsubscribe 先删 ListenTable 再出站', async () => {
 // ── request / response ──
 
 test('没有 Processor 的 kind → 立刻拒，报 no-processor', async () => {
-  const app = await startBare('me')       // startBare 不绑 kit 的 processor，但 start() 会兜默认的
+  const app = await startBare('me')       // startBare binds no kit processors; start() still adds defaults
   const { peer, sent } = fakePeer(app, 'p1')
   app.nact.addPeer(peer)
   app.nacp.bindAppId('them', 'p1')
 
-  // 默认 NACEB/NACAB 已被 start() 兜上，所以这里问一个不存在的 target 而不是不存在的 kind
+  // default NACEB/NACAB exist, so probe a missing target instead of a missing kind
   app.nacp.inbound(msg('request', {
     from: 'them', to: 'me', id: 'req-1', meta: { kind: 'ability', target: '没这个能力' },
   }), peer)
@@ -604,7 +740,7 @@ test('event 请求自动建本地订阅，subId 就是 reqId', async () => {
   assert.equal(app.nacp.getListenCount(), 1, 'AutoSub 的本地半条')
   assert.equal(sent.filter(m => m.type === 'subscribe').length, 0, '不发真 subscribe')
 
-  // 过程流的 parentId 就是 reqId —— 这是两侧唯一共知的 id
+  // process-stream parentId is the reqId — the only id both sides share
   const got = []
   app.nacp.inbound(msg('notify', {
     from: 'them', to: 'me',

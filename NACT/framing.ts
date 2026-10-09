@@ -1,75 +1,51 @@
-/**
- * NACT framing — fragmentation, reassembly, and the naked-stream parser. Pure functions, no NACT state.
- *
- * Every message carries a 32-byte self-delimiting fragment header (thisFrameSize inside), so there is NO
- * outer length prefix on either carrier. Sender splits when 32+encoded exceeds chunkSize; an empty message
- * still emits one headered fragment. Receive path performs exactly ONE copy (chunk → destination at offset).
- * Byte type is `Uint8Array` (browser-safe); Node Buffer satisfies it as-is.
- */
-
 import { nactInbound } from './errors.ts'
 
-/** Uses global Web Crypto so this file stays browser-safe. */
+// Global Web Crypto: keeps this file browser-safe.
 function randomBytes16(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(16))
 }
 
-/** OOM guard against malicious length prefixes, not a physical limit; also bounded by the runtime's max
- *  typed-array length (reassembly pre-allocates one Uint8Array(totalSize)). */
-export const MAX_FRAME_SIZE = 2 * 1024 * 1024 * 1024   // 2 GiB
+// OOM guard against hostile length prefixes, not a physical limit.
+export const MAX_FRAME_SIZE = 2 * 1024 * 1024 * 1024
 
 /**
- * Fragment header — 32 bytes, laid out on 2-byte alignment:
- *
- *   offset  size  field
- *   ------  ----  -------------
- *      0     16   msgId           random; shared by every fragment of one logical message
- *     16      4   offset          this fragment's start byte within the message
- *     20      4   totalSize       whole-message length (any-fragment-first pre-allocation)
- *     24      4   thisFrameSize   WHOLE fragment length INCLUDING this header; `< 32` = frame-too-small
- *     28      2   blank           RESERVED for future indicator/flag bits
- *     30      1   magic           0xCF in v1 — version-scoped, changes whenever the layout changes
- *     31      1   version         0x01 — last byte, always locatable without knowing the layout
- *
- * Parse order: version → magic → the rest (see checkFragHeader).
+ * Frame header — 32 bytes, 2-byte aligned:
+ *   0  +16  msgId         random; shared by every frame of one packet
+ *  16   4  offset         this frame's start within the packet
+ *  20   4  totalSize      whole-packet length
+ *  24   4  thisFrameSize  whole frame length INCLUDING header
+ *  28   2  reserved       for future indicator/flag bits
+ *  30   1  magic          version-scoped; changes when layout changes
+ *  31   1  version        last byte — locatable without knowing the layout
  */
-export const FRAG_HEADER = 32
-export const NACT_VERSION = 0x01                       // current wire-format version
-/** Expected magic per wire version. */
+export const FRAME_HEADER_SIZE = 32
+export const NACT_VERSION = 0x01
 export const MAGIC_BY_VERSION: Record<number, number> = { 0x01: 0xCF }
 
-export const REASSEMBLY_TIMEOUT_MS = 30000             // in-flight msgId not completed in time → drop + error
+export const REASSEMBLY_TIMEOUT_MS = 30000             // incomplete msgId → drop + error
 
-/** Default LOCAL send-side chunk thresholds. Overridable via TransportSpec.opt.chunkSize. */
+// Legacy; Providers own runtime defaults.
 export const DEFAULT_CHUNK: Record<string, number> = {
   unix: MAX_FRAME_SIZE,
   tcp: 100 * 1024 * 1024,
-  ws: 100 * 1024 * 1024,
+  websocket: 100 * 1024 * 1024,
 }
 
-/** Default heartbeat interval (ms). ON by default; `-1` disables. No separate timeout: the deadline IS the
- *  next interval, so worst-case detection is 2× this value. */
-export const DEFAULT_HEARTBEAT_MS = 30_000
-
-export function packFragHeader(msgId: Uint8Array, offset: number, totalSize: number, bodyLen: number): Uint8Array {
-  const h = new Uint8Array(FRAG_HEADER)
+export function packFrameHeader(msgId: Uint8Array, offset: number, totalSize: number, bodyLen: number): Uint8Array {
+  const h = new Uint8Array(FRAME_HEADER_SIZE)
   h.set(msgId.subarray(0, 16), 0)
   const dv = new DataView(h.buffer, h.byteOffset, h.byteLength)
   dv.setUint32(16, offset)
   dv.setUint32(20, totalSize)
-  dv.setUint32(24, FRAG_HEADER + bodyLen)                  // thisFrameSize: header + body
-  dv.setUint16(28, 0)                                      // blank — reserved for indicator bits
+  dv.setUint32(24, FRAME_HEADER_SIZE + bodyLen)
+  dv.setUint16(28, 0)
   dv.setUint8(30, MAGIC_BY_VERSION[NACT_VERSION]!)
   dv.setUint8(31, NACT_VERSION)
   return h
 }
 
-/**
- * Validate the version/magic pair of a received 32B header. Returns a failure reason, or null if acceptable.
- * Version FIRST (its position is the only stable guarantee), then magic as corruption guard.
- * Unknown version → drop; no back-compat parsing.
- */
-export function checkFragHeader(h: Uint8Array): 'version-mismatch' | 'bad-magic' | null {
+// Version first (its position is the only stable guarantee); unknown version → drop, no back-compat.
+export function checkFrameHeader(h: Uint8Array): 'version-mismatch' | 'bad-magic' | null {
   const version = h[31]!
   const expectMagic = MAGIC_BY_VERSION[version]
   if (expectMagic === undefined) return 'version-mismatch'
@@ -78,18 +54,13 @@ export function checkFragHeader(h: Uint8Array): 'version-mismatch' | 'bad-magic'
 }
 
 export interface Reassembler {
-  /** Ensure the destination buffer for a msgId exists; returns it so the caller copies the body in place. */
   ensure(msgId: string, totalSize: number): Uint8Array
-  /** Record [offset, offset+bodyLen) as filled. Completion fires onMsg; violations fire onError. */
   advance(msgId: string, offset: number, bodyLen: number): void
+  has(msgId: string): boolean
   clear(): void
 }
 
-/**
- * Single-copy reassembler: per msgId pre-allocate a totalSize buffer; each fragment body copied straight
- * into place. Completeness guarded by a filled-interval set — `received === total` alone cannot detect an
- * overlapping/duplicated fragment; overlap means a buggy or hostile sender → drop.
- */
+// The filled-interval set is what detects overlaps; `received === total` alone cannot.
 export function makeReassembler(onMsg: (full: Uint8Array) => void, onError: (reason: string) => void): Reassembler {
   type Entry = { buf: Uint8Array; received: number; total: number; intervals: Array<[number, number]>; timer: ReturnType<typeof setTimeout> }
   const table = new Map<string, Entry>()
@@ -108,78 +79,90 @@ export function makeReassembler(onMsg: (full: Uint8Array) => void, onError: (rea
       if (!e) return
       const lo = offset, hi = offset + bodyLen
       if (lo < 0 || bodyLen < 0 || hi > e.total) {
-        clearTimeout(e.timer); table.delete(msgId); return onError('fragment-out-of-bounds')
+        clearTimeout(e.timer); table.delete(msgId); return onError('frame-out-of-bounds')
       }
       for (const [s, t] of e.intervals) {
-        if (lo < t && hi > s) { clearTimeout(e.timer); table.delete(msgId); return onError('overlapping-fragment') }
+        if (lo < t && hi > s) { clearTimeout(e.timer); table.delete(msgId); return onError('overlapping-frame') }
       }
       e.intervals.push([lo, hi])
       e.received += bodyLen
       if (e.received === e.total) { clearTimeout(e.timer); table.delete(msgId); onMsg(e.buf) }
     },
+    has: msgId => table.has(msgId),
     clear() { for (const e of table.values()) clearTimeout(e.timer); table.clear() },
   }
 }
 
-/**
- * Fused stream parser for tcp/unix — two-phase state machine over arriving socket chunks:
- * [32B header] → body bytes copied STRAIGHT into the reassembler's destination at `offset` (no intermediate
- * frame buffer). Throws NACTError on an over-cap/undersized frame or a rejected header.
- */
-export function makeStreamParser(reasm: Reassembler) {
-  let phase: 'header' | 'body' = 'header'
-  const hdrBuf = new Uint8Array(FRAG_HEADER); let hdrFilled = 0
-  const hdrView = new DataView(hdrBuf.buffer, hdrBuf.byteOffset, hdrBuf.byteLength)
-  let bodyLen = 0, bodyFilled = 0
-  let dst: Uint8Array | null = null, dstOffset = 0, curMsgId = ''
-  return (chunk: Uint8Array) => {
-    let pos = 0
-    while (pos < chunk.length) {
-      if (phase === 'header') {
-        const take = Math.min(FRAG_HEADER - hdrFilled, chunk.length - pos)
-        hdrBuf.set(chunk.subarray(pos, pos + take), hdrFilled); hdrFilled += take; pos += take
-        if (hdrFilled < FRAG_HEADER) return
-        hdrFilled = 0
-        const bad = checkFragHeader(hdrBuf)
-        if (bad) throw nactInbound(bad, `fragment header rejected: ${bad}`)
-        const frameSize = hdrView.getUint32(24)
-        if (frameSize < FRAG_HEADER)
-          throw nactInbound('frame-too-small', `frame size ${frameSize} below header size ${FRAG_HEADER}`)
-        if (frameSize > MAX_FRAME_SIZE)
-          throw nactInbound('frame-too-large', `frame size ${frameSize} exceeds cap ${MAX_FRAME_SIZE}`)
-        bodyLen = frameSize - FRAG_HEADER
-        curMsgId = toHex(hdrBuf.subarray(0, 16))
-        dstOffset = hdrView.getUint32(16)
-        const totalSize = hdrView.getUint32(20)
-        dst = reasm.ensure(curMsgId, totalSize)
-        bodyFilled = 0; phase = 'body'
-        if (bodyLen === 0) { reasm.advance(curMsgId, dstOffset, 0); phase = 'header' }
-      } else {
-        // body — copy straight into the destination message buffer (the single copy)
-        const take = Math.min(bodyLen - bodyFilled, chunk.length - pos)
-        dst!.set(chunk.subarray(pos, pos + take), dstOffset + bodyFilled); bodyFilled += take; pos += take
-        if (bodyFilled === bodyLen) { reasm.advance(curMsgId, dstOffset, bodyLen); phase = 'header' }
-      }
-    }
+export interface FrameReceiver {
+  receive(frame: readonly Uint8Array[]): void
+  clear(): void
+}
+
+function copyFrom(frame: readonly Uint8Array[], from: number, length: number, dst: Uint8Array, at: number) {
+  for (const bytes of frame) {
+    if (!length) return
+    if (from >= bytes.byteLength) { from -= bytes.byteLength; continue }
+    const part = bytes.subarray(from, from + length)
+    dst.set(part, at)
+    at += part.byteLength
+    length -= part.byteLength
+    from = 0
   }
 }
 
-/** Bytes → lowercase hex. Only used on the 16-byte msgId, not a hot path. */
+export function makeFrameReceiver(onMsg: (full: Uint8Array) => void, onError: (reason: string) => void): FrameReceiver {
+  const reasm = makeReassembler(onMsg, onError)
+  const header = new Uint8Array(FRAME_HEADER_SIZE)
+  const view = new DataView(header.buffer)
+  return {
+    receive(frame) {
+      let size = 0
+      for (const bytes of frame) size += bytes.byteLength
+      if (size < FRAME_HEADER_SIZE) throw nactInbound('frame-too-small', `frame size ${size} below header size ${FRAME_HEADER_SIZE}`)
+      copyFrom(frame, 0, FRAME_HEADER_SIZE, header, 0)
+      const bad = checkFrameHeader(header)
+      if (bad) throw nactInbound(bad, `frame header rejected: ${bad}`)
+      const frameSize = view.getUint32(24)
+      if (frameSize > MAX_FRAME_SIZE)
+        throw nactInbound('frame-too-large', `frame size ${frameSize} exceeds cap ${MAX_FRAME_SIZE}`)
+      if (frameSize !== size)
+        throw nactInbound('frame-size-mismatch', `header says ${frameSize} bytes, frame has ${size}`)
+
+      const msgId = toHex(header.subarray(0, 16))
+      const offset = view.getUint32(16)
+      const total = view.getUint32(20)
+      const bodyLen = size - FRAME_HEADER_SIZE
+      if (offset === 0 && bodyLen === total && !reasm.has(msgId)) {
+        const first = frame[0]!
+        if (first.byteLength >= size) return onMsg(first.subarray(FRAME_HEADER_SIZE, size))
+        if (first.byteLength === FRAME_HEADER_SIZE && frame.length === 2) return onMsg(frame[1]!)
+        const body = new Uint8Array(bodyLen)
+        copyFrom(frame, FRAME_HEADER_SIZE, bodyLen, body, 0)
+        return onMsg(body)
+      }
+
+      const dst = reasm.ensure(msgId, total)
+      if (offset + bodyLen <= dst.byteLength) copyFrom(frame, FRAME_HEADER_SIZE, bodyLen, dst, offset)
+      reasm.advance(msgId, offset, bodyLen)
+    },
+    clear: () => reasm.clear(),
+  }
+}
+
 export function toHex(b: Uint8Array): string {
   let s = ''
   for (let i = 0; i < b.length; i++) s += b[i]!.toString(16).padStart(2, '0')
   return s
 }
 
-/** Split an encoded message into fragments, handing each to `emit(header, body)`. bodyMax = chunkSize-32.
- *  An empty message still emits one headered fragment, so the receive path has no special case. */
+// An empty packet still emits one frame: no special case on the receive path.
 export function splitAndEmit(bytes: Uint8Array, chunkSize: number, emit: (header: Uint8Array, body: Uint8Array) => void) {
   const total = bytes.length
-  const bodyMax = Math.max(1, chunkSize - FRAG_HEADER)
+  const bodyMax = Math.max(1, chunkSize - FRAME_HEADER_SIZE)
   const msgId = randomBytes16()
-  if (total === 0) { emit(packFragHeader(msgId, 0, 0, 0), new Uint8Array(0)); return }
+  if (total === 0) { emit(packFrameHeader(msgId, 0, 0, 0), new Uint8Array(0)); return }
   for (let off = 0; off < total; off += bodyMax) {
-    const body = bytes.subarray(off, Math.min(off + bodyMax, total))   // zero-copy slice
-    emit(packFragHeader(msgId, off, total, body.length), body)
+    const body = bytes.subarray(off, Math.min(off + bodyMax, total))
+    emit(packFrameHeader(msgId, off, total, body.length), body)
   }
 }

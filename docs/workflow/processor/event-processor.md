@@ -8,7 +8,7 @@ EventProcessor处理具有生命周期的Event请求，在Processor基础上增�
 import type {
   EventProcessor,
   ProcessorSignalSpec,
-} from '@chenyfan/nasdk/types'
+} from '@nyirusu/nasdk/types'
 
 interface EventProcessor extends Processor {
   signal(spec: ProcessorSignalSpec): Promise<void>

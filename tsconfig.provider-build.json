@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.provider.json",
+  "compilerOptions": {
+    "paths": {
+      "@nyirusu/nasdk/NACT": ["./dist/NACT/index.d.ts"],
+      "@nyirusu/nact-provider-shared": ["./packages/nact-provider-shared/dist/index.d.ts"]
+    }
+  }
+}

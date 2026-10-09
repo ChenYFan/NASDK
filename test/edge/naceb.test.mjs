@@ -1,12 +1,4 @@
-/**
- * edge/naceb — 临界值与压力。
- *
- * full/naceb 覆盖正常路径，这里挑规模与退化：大量事件排队、资源锁下的吞吐、深层 SubEvent、
- * 时钟在极端队列下的行为、handler 抛非 Error、pause 撞上不合作的 handler。
- *
- * 每个测试都必须消费掉自己的终态事件 —— 终态事件留在队列里会让 NACEB 的时钟一直转，
- * 进程就不退出了（这是产品行为，不是 bug）。
- */
+// Every test must drain terminal events: leftovers keep the NACEB clock ticking (process won't exit).
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -17,7 +9,7 @@ import { z } from 'zod'
 
 const SLOW = !!process.env.NASDK_SLOW
 
-// ── handler ──
+// ── handlers ──
 
 class Ret extends TaskHandler {
   name = 'ret'
@@ -50,7 +42,7 @@ class ThrowWeird extends TaskHandler {
   async execute() { throw this.input?.what }
 }
 
-/** 不看 abortSignal —— pause 只能等 stopTimeoutMs。edge 专用。 */
+/** Ignores abortSignal — pause can only wait for stopTimeoutMs. Edge-only. */
 class Stubborn extends TaskHandler {
   name = 'stubborn'
   description = '不响应 abort'
@@ -99,19 +91,19 @@ const build = (extra = {}) => new NACEB({
   ],
 })
 
-/** 等到事件到终态；返回实际等了多久。超时就抛（避免整套挂死）。 */
+/** Wait until an event reaches a terminal state; throws on timeout so the suite can't hang. */
 async function settle(naceb, id, ms = 20000) {
   const t0 = performance.now()
   while (performance.now() - t0 < ms) {
     const s = naceb.getEvent(id)?.status
     if (s === 'done' || s === 'failure') return performance.now() - t0
-    if (s === undefined) return performance.now() - t0        // 已被消费
+    if (s === undefined) return performance.now() - t0        // already consumed
     await sleep(5)
   }
   throw new Error(`event ${id} 在 ${ms}ms 内没到终态（当前 ${naceb.getEvent(id)?.status}）`)
 }
 
-/** 消费掉所有终态事件（先取 id 快照，避免遍历时改动集合）。 */
+/** Consume all terminal events (id snapshot first: mutating while iterating is unsafe). */
 function drain(naceb) {
   for (const id of naceb.listEvent().map(e => e.id)) {
     const e = naceb.getEvent(id)
@@ -119,7 +111,7 @@ function drain(naceb) {
   }
 }
 
-// ── 队列规模 ──
+// ── queue scale ──
 
 test('1000 个事件排队，全部跑完且结果各归各位', async () => {
   const naceb = build()
@@ -140,7 +132,7 @@ test('1000 个事件排队，全部跑完且结果各归各位', async () => {
 
 test('1000 个事件停在 idle 不消耗时钟，再一起放行', async () => {
   const naceb = build()
-  // pushEvent 默认停在 idle —— 刻意留的窗口，用来挂 hook
+  // pushEvent parks at idle by default — the intended window for attaching hooks.
   const ids = Array.from({ length: 1000 }, (_, i) =>
     naceb.pushEvent({ name: 'go', payload: { task: 'fast', v: i } }))
 
@@ -174,7 +166,7 @@ test('50 个事件 × 20 步并发，共 1000 个 task 分派', async () => {
   drain(naceb)
 })
 
-// ── 资源锁下的吞吐 ──
+// ── throughput under busyKey locks ──
 
 test('100 个抢同一把 busyKey：严格串行，peak 恒为 1', async () => {
   const naceb = build()
@@ -248,7 +240,7 @@ test('两把 key 各自串行、彼此并行', async () => {
   drain(naceb)
 })
 
-// ── SubEvent 深度 ──
+// ── SubEvent depth ──
 
 test('SubEvent 嵌套 20 层', async () => {
   class Recurse extends PipelineHandler {
@@ -285,12 +277,12 @@ test('一个父事件 fire 50 个子事件', async () => {
   const id = naceb.pushEvent({ name: 'fire50', payload: {} }, { bypassIdle: true })
   const [, ms] = await timed(() => settle(naceb, id))
   assert.deepEqual(naceb.consumeEvent(id), { fired: 50 })
-  await sleep(300)                                    // 让子事件各自跑完
+  await sleep(300)                                    // let child events finish
   console.log(`    fire 50 个子事件: ${ms.toFixed(0)}ms`)
   drain(naceb)
 })
 
-// ── 退化输入 ──
+// ── degenerate inputs ──
 
 test('task 抛非 Error：字符串 / 数字 / null / undefined / Symbol', async () => {
   const naceb = build()
@@ -342,7 +334,7 @@ test('next() 指向不存在的 task → 事件落 failure', async () => {
   naceb.consumeEvent(id)
 })
 
-// ── Veto 压力 ──
+// ── veto stress ──
 
 test('连续否决 100 次后放行 —— veto 靠下拍重试收敛', async () => {
   const naceb = build()
@@ -376,7 +368,7 @@ test('终局 veto 无论试几次都不可否决 —— 不会死循环', async 
   naceb.consumeEvent(id)
 })
 
-// ── 观测面高频 ──
+// ── observation under load ──
 
 test('单事件 100 步的观测事件量', async () => {
   const naceb = build()
@@ -386,7 +378,7 @@ test('单事件 100 步的观测事件量', async () => {
   await settle(naceb, id)
   tEvents.stop(); logs.stop()
 
-  // 只断言量级关系，不写死数字 —— 具体条数依赖状态机边数，改一条边就假红
+  // Assert only magnitude, not exact counts — they depend on state machine edges.
   assert.ok(tEvents.events.length > 100, `T 事件随步数增长，实得 ${tEvents.events.length}`)
   const layers = new Set(tEvents.events.map(e => e.hitKey.split(':')[1]))
   assert.deepEqual([...layers].sort(), ['event', 'pipeline', 'task'], '三层都有')
@@ -405,11 +397,10 @@ test('挂 200 个观测者不影响事件跑完', async () => {
   assert.equal(fired, 200)
 })
 
-// ── 时钟 ──
+// ── clock ──
 
 test('空队列时时钟应当停下 —— 消费完终态事件后进程能退出', async () => {
-  // 这是本文件每个测试都要 drain 的原因：终态事件留在队列里，队列非空 ⇒ 还要 tick，
-  // 时钟就永远转下去。这条把这个契约本身钉住。
+  // Why every test drains: terminal events left queued keep the clock ticking forever.
   const naceb = build()
   const id = naceb.pushEvent({ name: 'go', payload: { task: 'fast', v: 1 } }, { bypassIdle: true })
   await settle(naceb, id)
@@ -418,11 +409,10 @@ test('空队列时时钟应当停下 —— 消费完终态事件后进程能退
   assert.equal(naceb.listEvent().length, 0, '消费后队列空 —— 时钟这才能停')
 })
 
-// ── 超时路径（默认 skip）──
+// ── timeout paths (skipped by default) ──
 
 test('pause 撞上不响应 abort 的 handler：等满 stopTimeoutMs(120s)', { skip: !SLOW }, async () => {
-  // 协作式取消的必然结果：handler 不看 abortSignal，框架只能等到 stopTimeoutMs。
-  // 不是 bug，但真等 2 分钟，所以默认 skip。
+  // Cooperative cancellation: a handler ignoring abortSignal forces a full stopTimeoutMs wait.
   const naceb = build()
   const payload = { task: 'stubborn', release: [] }
   const id = naceb.pushEvent({ name: 'go', payload }, { bypassIdle: true })
@@ -453,12 +443,12 @@ test('pause 在响应 abort 的 handler 上是毫秒级 —— 与上一条对�
   drain(naceb)
 })
 
-// ── payloadSchema：task 输入闸门 ──
+// ── payloadSchema: task input gate ──
 //
-// TaskHandler.payloadSchema（可选）在 dispatch 处 safeParse(step.input)。纯闸门：parse 输出丢弃，
-// execute 拿原始 input（多余字段原样留）。拒绝 → 抛 → pipeline failure → event failure（硬失败，不重试）。
+// TaskHandler.payloadSchema (optional) is safeParse(step.input) at dispatch; pure gate:
+// parse output is discarded, execute gets the raw input. Rejection → hard failure, no retry.
 
-/** 声明 payloadSchema 的 task；execute 把实际拿到的 input 原样回吐，供测试检查"多余字段是否还在"。 */
+/** Task with payloadSchema; echoes the actual input so tests can check "extra fields kept". */
 class Gated extends TaskHandler {
   name = 'gated'
   description = '带 payloadSchema 的 task，原样回吐 input'
@@ -466,7 +456,7 @@ class Gated extends TaskHandler {
   async execute() { return this.input }
 }
 
-/** 把 event.payload.step 当 step.input 直接喂给目标 task（让测试能精确控制流入形状）。 */
+/** Feeds event.payload.step directly to the gated task (exact control over input shape). */
 class ToGated extends PipelineHandler {
   name = 'toGated'
   description = '把 payload.step 喂给 gated'
@@ -492,7 +482,7 @@ test('payloadSchema 拒绝坏输入 → 事件落 failure（不留半个 task）
 })
 
 test('不填 payloadSchema → 无约束，任意输入放行', async () => {
-  const naceb = build()   // ret / fast 都没声明 payloadSchema
+  const naceb = build()   // ret / fast declare no payloadSchema
   const id = naceb.pushEvent({ name: 'go', payload: { task: 'ret', 啥都行: true, n: 'xyz' } }, { bypassIdle: true })
   await settle(naceb, id)
   assert.equal(naceb.getEvent(id).status, 'done', '无 schema 的 task 不校验，直接跑完')
@@ -501,7 +491,6 @@ test('不填 payloadSchema → 无约束，任意输入放行', async () => {
 
 test('纯闸门：多余字段原样进 execute，不被 strip/coerce', async () => {
   const naceb = buildGated()
-  // n 合法（过闸门），额外带 extra 字段 —— A 语义要求 execute 仍拿到原始 input（含 extra）
   const id = naceb.pushEvent({ name: 'gate', payload: { step: { n: 42, extra: 'kept', nested: { a: 1 } } } }, { bypassIdle: true })
   await settle(naceb, id)
   assert.equal(naceb.getEvent(id).status, 'done')

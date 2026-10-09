@@ -41,8 +41,8 @@ AsyncTask没有并发限制，很适合做一些轻量任务。
 ## 定义 Handler
 
 ```ts
-import { TaskHandler } from '@chenyfan/nasdk/NACEB'
-import type { TaskInstance } from '@chenyfan/nasdk/NACEB'
+import { TaskHandler } from '@nyirusu/nasdk/NACEB'
+import type { TaskInstance } from '@nyirusu/nasdk/NACEB'
 import { z } from 'zod'
 
 class GreetingTask extends TaskHandler<string> { // [!code focus:11]

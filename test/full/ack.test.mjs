@@ -1,8 +1,4 @@
-/**
- * full/ack — NACP ACK 生命周期与断线续发。
- *
- * 使用 fake peer 精确控制 ACK 到达时机；Gateway 的真实多跳往返由 edge/nacp 覆盖。
- */
+// ACK lifecycle and reconnect replay, driven by a fake peer for exact timing.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -132,6 +128,26 @@ test('重连宽限到期后丢弃 backlog，并以 false 结束 ACK waiter', asy
 
   assert.equal(await waitFor(delivered), false)
   assert.deepEqual(app.listConnectedApp({ isOnlineOnly: false }), [])
+  await app.terminate()
+})
+
+test('拨号方在宽限期内重连：取消宽限计时并续发 backlog', async () => {
+  const app = await startBare('me', { reconnectGraceMs: 200 })
+  const { peer: first } = fakePeer(app, 'p1')
+  app.nact.addPeer(first)
+  assert.equal(await app.nacp.register('them', first), true)
+
+  app.bus.emit('nact:peer:disconnect', { peerId: 'p1' })          // → offline + grace window
+  const delivered = app.response('them', { parentId: 'request-1', isOk: true })   // → backlog
+
+  const { peer: second, sent } = fakePeer(app, 'p2')
+  app.nact.addPeer(second)
+  assert.equal(await app.nacp.register('them', second), true, '拨号方重新握手')
+
+  assert.equal(await waitFor(delivered), true, '离线期间的 response 补发并被 ACK')
+  assert.ok(sent.some(m => m.type === 'response' && m.meta.parentId === 'request-1'))
+  await sleep(250)                                                // past the old grace window
+  assert.deepEqual(app.listConnectedApp(), ['them'], '旧的宽限计时已取消，没有 forget 新连接')
   await app.terminate()
 })
 

@@ -1,0 +1,78 @@
+import type { ClientProvider, Channel } from '@nyirusu/nasdk/NACT'
+
+export interface WebSocketClientOptions { url: string }
+export interface WebSocketClientTransportSpec {
+  type: 'websocket'
+  provider: WebSocketClientOptions
+  nact?: { chunkSize?: number }
+}
+
+interface SocketLike {
+  binaryType: BinaryType
+  readonly readyState: number
+  send(data: Uint8Array): void
+  close(): void
+  terminate?: () => void
+  addEventListener(type: string, listener: (event: any) => void): void
+  removeEventListener(type: string, listener: (event: any) => void): void
+}
+
+class WebSocketChannel implements Channel {
+  private errorHandlers = new Set<(reason: unknown) => void>()
+  constructor(private socket: SocketLike) {}
+  send(frame: readonly Uint8Array[]) {
+    if (this.socket.readyState !== 1) throw Object.assign(new Error('transport-closed'), { code: 'transport-closed' })
+    const size = frame.reduce((sum, part) => sum + part.byteLength, 0)
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const part of frame) { bytes.set(part, offset); offset += part.byteLength }
+    this.socket.send(bytes)
+  }
+  close() { this.socket.close() }
+  terminate() { this.socket.terminate?.() ?? this.socket.close() }
+  onReceive(handler: (frame: readonly Uint8Array[]) => void) {
+    const listener = (event: MessageEvent) => {
+      if (event.data instanceof ArrayBuffer) handler([new Uint8Array(event.data)])
+      else if (ArrayBuffer.isView(event.data)) handler([new Uint8Array(event.data.buffer, event.data.byteOffset, event.data.byteLength)])
+      else this.fail('non-binary-frame')
+    }
+    this.socket.addEventListener('message', listener)
+    return () => this.socket.removeEventListener('message', listener)
+  }
+  onClose(handler: () => void) {
+    this.socket.addEventListener('close', handler); return () => this.socket.removeEventListener('close', handler)
+  }
+  onError(handler: (reason: unknown) => void) {
+    this.errorHandlers.add(handler)
+    const listener = (reason: unknown) => this.fail(reason)
+    this.socket.addEventListener('error', listener)
+    return () => { this.errorHandlers.delete(handler); this.socket.removeEventListener('error', listener) }
+  }
+  private fail(reason: unknown) { for (const handler of this.errorHandlers) handler(reason) }
+}
+
+export default class WebSocketClientProvider
+  implements ClientProvider<'websocket', WebSocketClientOptions> {
+  readonly type = 'websocket'
+  readonly role = 'client'
+  readonly defaultChunkSize = 100 * 1024 * 1024
+
+  async dial(options: WebSocketClientOptions): Promise<Channel> {
+    const Constructor = typeof WebSocket === 'undefined'
+      ? (await import('ws')).default
+      : WebSocket
+    const socket = new Constructor(options.url) as unknown as SocketLike
+    socket.binaryType = 'arraybuffer'
+    await new Promise<void>((resolve, reject) => {
+      const open = () => { cleanup(); resolve() }
+      const error = (reason: unknown) => { cleanup(); reject(reason) }
+      const cleanup = () => {
+        socket.removeEventListener('open', open)
+        socket.removeEventListener('error', error)
+      }
+      socket.addEventListener('open', open)
+      socket.addEventListener('error', error)
+    })
+    return new WebSocketChannel(socket)
+  }
+}

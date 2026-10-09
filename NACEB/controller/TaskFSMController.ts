@@ -1,11 +1,4 @@
-/**
- * NACEB Task layer — TaskInstance + the three builtin $ handlers + TaskFSMController.
- *
- * TaskFSMController holds two lanes and doubles as the runner:
- *   - blockedQueue: one busyKey → lane; within a lane, serial (one running at a time).
- *   - asyncQueue:   flat, unbounded concurrency.
- * A handler with busyKeys is blocked; without, async. This is the async/blocked split.
- */
+// blockedQueue: busyKey → lane, serial within a lane. asyncQueue: flat, unbounded concurrency.
 
 import {
   TaskHandler, TaskResponse, TASK_TRANSITIONS, cap, isBlocked,
@@ -18,10 +11,7 @@ import { TaskInstance } from '../instance/TaskInstance.ts'
 export { TaskInstance } from '../instance/TaskInstance.ts'
 import type { PipelineInstance } from '../instance/PipelineInstance.ts'
 
-// ============================================================
-// builtin privileged handlers
-// ============================================================
-// execute shaped like a user handler (`this` = TaskInstance); NACEB capability captured via closure over ref.
+// Builtin $ handlers: `this` = TaskInstance; NACEB capability captured via closure over ref.
 
 function makeTerminalHandler(): TaskHandler {
   return new class extends TaskHandler<unknown> {
@@ -63,15 +53,14 @@ function makeWait4SubEventHandler(ref: NACEBRef): TaskHandler {
   }()
 }
 
-// ============================================================
-// TaskFSMController
-// ============================================================
 export class TaskFSMController {
   private builtins = new Map<string, TaskHandler>()
   blockedQueue = new Map<string, TaskInstance[]>()
   asyncQueue: TaskInstance[] = []
   protected byId = new Map<string, TaskInstance>()
-  stopTimeoutMs = 120000   // _stop 里 abort 后最多等 task 内任务回调收尾的时长（120s）；超时视为收尾（execute Promise 后台自生自灭）。影响 pause 与 forceCleanEventUnderLayer 清理。
+  // After abort, wait at most this long for the execute callback to settle; past it the
+  // promise is abandoned. Affects pause and forceCleanEventUnderLayer cleanup.
+  stopTimeoutMs = 120000
   naceb: NACEB
   ref: NACEBPrivateRef
 
@@ -79,22 +68,19 @@ export class TaskFSMController {
     this.naceb = naceb; this.ref = ref
   }
 
-  /** Look up a handler: builtins ($ task) first, then the public taskHandlers registry. */
   _getHandler(name: string): TaskHandler | undefined {
     return this.builtins.get(name) ?? this.naceb.taskHandlers.get(name)
   }
 
-  /** All tasks of this event (usually 0-1 at runtime). */
   findTaskByEventId(eventId: string): TaskInstance[] {
     return [...this.byId.values()].filter(t => t.eventId === eventId)
   }
 
-  /** Assembly-only: register a builtin $ handler. */
   registerBuiltin(h: TaskHandler) { this.builtins.set(h.name, h) }
 
   dispatch(pipeline: PipelineInstance, step: PipelineStep): TaskInstance {
     const h = this._getHandler(step.task); if (!h) throw new Error(`unknown task '${step.task}'`)
-    // Validate before constructing the task; PipelineInstance turns this throw into pipeline/event failure.
+    // Validate before constructing; PipelineInstance turns this throw into pipeline/event failure.
     if (h.payloadSchema) {
       const r = h.payloadSchema.safeParse(step.input)
       if (!r.success) throw nacebInternal('bad-task-input', `task '${step.task}' input rejected: ${r.error.message}`)
@@ -114,8 +100,7 @@ export class TaskFSMController {
   }
   private isLaneFree(k: string) { return !(this.blockedQueue.get(k) || []).some(t => t.status === 'running') }
 
-  /** ignite: promote a pending task to running, then _run. beforeTRunning is the only veto point
-   *  (veto → stay pending; hook bug → layer failure). */
+  // beforeTRunning is the only veto point (veto → stay pending).
   private async _ignite(t: TaskInstance): Promise<boolean> {
     if (await t._transition('running')) t._run()
     return true

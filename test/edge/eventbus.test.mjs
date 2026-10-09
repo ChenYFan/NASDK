@@ -1,18 +1,9 @@
-/**
- * edge/eventbus — 临界值与压力。
- *
- * full/eventbus 覆盖规则本身，这里挑规模与边界：大量订阅时的派发成本、maxListeners 的确切阈值、
- * key 的退化形状（空段、超长、超多段）、递归 emit 会爆栈这件事。
- *
- * 性能只打印。EventBus 是根级热路径，派发成本的量级值得留个记录。
- */
-
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventBus, readonlyView } from '../../EventBus.ts'
 import { timed } from '../_kit.mjs'
 
-// ── 规模 ──
+// ── scale ──
 
 test('10000 个精确订阅散在不同 key，派发只碰命中的那个', async () => {
   const bus = new EventBus()
@@ -26,7 +17,7 @@ test('10000 个精确订阅散在不同 key，派发只碰命中的那个', asyn
 
 test('同一 key 上 5000 个订阅，一次 emit 全触发', async () => {
   const bus = new EventBus()
-  bus.onError = () => {}              // 吃掉 maxListeners 警告
+  bus.onError = () => {}              // swallow maxListeners warnings
   let hits = 0
   for (let i = 0; i < 5000; i++) bus.listen('same', () => hits++)
 
@@ -36,9 +27,7 @@ test('同一 key 上 5000 个订阅，一次 emit 全触发', async () => {
 })
 
 test('派发成本取决于「注册过几种形状」，而不是 key 有几段', async () => {
-  // 实现是按 (段数 + 通配掩码 + 字面段) 分桶，emit 只遍历**实际注册过**的形状。
-  // 所以 10 段 key 只订精确一种时，查找只走 1 个桶 —— 比 3 段 key 订满 8 种形状还便宜。
-  // 这条对照钉住这个反直觉但正确的事实。
+  // Cost scales with registered shape count, not key segment count.
   const wide = new EventBus()
   const wideKey = Array.from({ length: 10 }, (_, i) => `s${i}`).join(':')
   let wideHits = 0
@@ -58,7 +47,7 @@ test('派发成本取决于「注册过几种形状」，而不是 key 有几段
   console.log('    → 段数不是成本来源，注册过的形状数才是')
 })
 
-// ── maxListeners 的确切阈值 ──
+// ── maxListeners threshold ──
 
 test('maxListeners 警告在第 51 个订阅才出现，且消息里有数量和 key', () => {
   const bus = new EventBus()
@@ -97,7 +86,7 @@ test('通配符桶和精确桶各自计数，不合并', () => {
   assert.deepEqual(warns, [], '两个桶各 40，都没过 50 —— 阈值是按桶算的')
 })
 
-// ── key 的退化形状 ──
+// ── degenerate keys ──
 
 test('空段、全空段、前后导冒号', () => {
   const bus = new EventBus()
@@ -110,7 +99,6 @@ test('空段、全空段、前后导冒号', () => {
   bus.emit('a::b', {})
   assert.deepEqual(got, ['a:', ':a', '::', 'a::b'], '空段是合法的一段，字面匹配')
 
-  // * 能匹配空段
   const wild = []
   bus.listen('a:*', (_p, k) => wild.push(k))
   bus.emit('a:', {})
@@ -145,12 +133,10 @@ test('超长单段：100KB 的段名', () => {
   assert.equal(hit, 2, '段名多长都只是个字符串')
 })
 
-// ── 递归 emit ──
+// ── recursive emit ──
 
 test('listen 的 cb 里 emit 同一个 key 会爆栈 —— 记录事实，不是保护', () => {
-  // EventBus 对递归 emit 没有深度保护，和 Node 原生 EventEmitter 一致：递归是订阅者的 bug。
-  // 栈溢出被 onError 兜住（异常隔离是有的），所以进程不死，但那一拍的派发废了。
-  // 这条测试钉住现状：哪天加了深度闸，它会红，提醒改文档。
+  // No recursion guard; stack overflow lands in onError, matching Node's EventEmitter.
   const bus = new EventBus()
   const errs = []
   bus.onError = (_k, e) => errs.push(e.message)
@@ -187,13 +173,12 @@ test('两个 listener 互相 emit 也会爆栈', () => {
   assert.ok(errs.some(m => /call stack/i.test(m)), '跨 listener 的环，深度闸也拦不住的那种')
 })
 
-// ── 异步与顺序 ──
+// ── async & ordering ──
 
 test('5000 个 async listener 全部 reject，onError 一条不漏', async () => {
   const bus = new EventBus()
   const rejects = [], warns = []
-  // onError 是两路合流的：listener 抛错走这里，maxListeners 超标警告也走这里。
-  // 按内容分开数 —— 5000 个订阅会顺带产生 4950 条泄漏警告（第 51 个起每加一个一条）。
+  // onError carries both listener errors and maxListeners warnings; split by content.
   bus.onError = (_k, e) => (/possible leak/.test(e.message) ? warns : rejects).push(e.message)
   for (let i = 0; i < 5000; i++) bus.listen('boom', async () => { throw new Error(`e${i}`) })
   assert.equal(warns.length, 4950, '订阅阶段的警告数 = 5000 - maxListeners(50)')
@@ -209,14 +194,14 @@ test('emit 期间大量增删订阅不影响本次派发的名单', () => {
   const ran = []
   const ids = []
   for (let i = 0; i < 100; i++) ids.push(bus.listen('churn', () => ran.push(i)))
-  // 第一个 listener 把后面 99 个全摘掉，再加 100 个新的
+  // First listener removes the other 99 and adds 100 new ones mid-emit.
   bus.listen('churn', () => {
     for (const id of ids) bus.off(id)
     for (let i = 0; i < 100; i++) bus.listen('churn', () => ran.push(`new${i}`))
   })
 
   bus.emit('churn', {})
-  // 本次派发的名单在 emit 开始时就定了：100 个老的照跑，新加的一个都不跑
+  // Dispatch list is snapshotted at emit start: old 100 run, new ones don't.
   assert.equal(ran.length, 100, `本次只跑快照里的 100 个，实得 ${ran.length}`)
   assert.ok(ran.every(v => typeof v === 'number'), '没有 new* 混进来')
 })
@@ -229,7 +214,7 @@ test('asyncListenOnce 大量并发等待同一个 key', async () => {
   assert.deepEqual(got, Array.from({ length: 1000 }, (_, i) => i), '1000 个各自拿到自己 cb 的返回值')
 })
 
-// ── readonlyView 规模 ──
+// ── readonlyView scale ──
 
 test('readonlyView 的读透传开销', async () => {
   const target = { a: 1, b: 2, get c() { return this.a + this.b } }
@@ -243,7 +228,7 @@ test('readonlyView 的读透传开销', async () => {
 test('嵌套 readonlyView 不会叠加保护', () => {
   const target = { deep: { deeper: { v: 1 } } }
   const view = readonlyView(target)
-  // 浅层保护：第一层拦住，往下裸返回
+  // Shallow guard: first level only.
   assert.throws(() => { view.deep = {} }, /readonly/)
   view.deep.deeper.v = 99
   assert.equal(target.deep.deeper.v, 99, '两层往下照样改得动')

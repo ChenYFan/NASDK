@@ -1,10 +1,4 @@
-/**
- * NACEB Pipeline layer — PipelineInstance + PipelineFSMController.
- *
- * PipelineHandler is stateless; next() is called with `this` bound to the PipelineInstance so
- * handler-authored state (e.g. this.hits) lives on the instance, not the handler.
- * final lives here, not on the task.
- */
+// final lives here, not on the task.
 
 import { PIPELINE_TRANSITIONS, cap, TERMINAL } from '../types.ts'
 import type { PipelineStatus, PipelineStep, PipelineHandler, NormalSignal, HookFn, NACEBPrivateRef } from '../types.ts'
@@ -14,9 +8,6 @@ import type { EventInstance } from '../instance/EventInstance.ts'
 import { PipelineInstance } from '../instance/PipelineInstance.ts'
 export { PipelineInstance } from '../instance/PipelineInstance.ts'
 
-// ============================================================
-// PipelineFSMController
-// ============================================================
 export class PipelineFSMController {
   queue: PipelineInstance[] = []
   naceb: NACEB
@@ -34,7 +25,7 @@ export class PipelineFSMController {
     return p
   }
   getByEventId(eventId: string): PipelineInstance | null { return this.queue.find(p => p.event.id === eventId) ?? null }
-  /** Takes an eventId (pipeline is injective per event — an event has at most one pipeline). */
+  // An event has at most one pipeline.
   getStatus(eventId: string) { return this.getByEventId(eventId)?.status ?? null }
   removeByEventId(eventId: string) { const i = this.queue.findIndex(p => p.event.id === eventId); if (i >= 0) this.queue.splice(i, 1) }
 
@@ -62,7 +53,6 @@ export class PipelineFSMController {
       } else if (t.status === 'stopped') {
         await p._transition('paused')
       } else {
-        // task failure → pipeline failure: consume the task ({error}) + write final.
         await p._transition('failure', [() => { p.result.final = t.consume(); p.currentTaskId = null }])
       }
       moved = true

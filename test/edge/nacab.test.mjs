@@ -1,20 +1,13 @@
-/**
- * edge/nacab — 临界值与压力。
- *
- * full/nacab 覆盖正常路径，这里挑规模与退化：大量并发 invoke（NACAB 契约上无并发上限）、
- * 大 payload、handler 的各种非常规返回、能力名的退化形状、观测面在高频下的开销。
- */
-
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { NACAB } from '../../NACAB/index.ts'
 import { NACABError } from '../../NACAB/errors.ts'
 import { collect, timed, rate, sleep } from '../_kit.mjs'
 
-// ── 并发规模 ──
+// ── concurrency scale ──
 
 test('5000 次并发 invoke：无上限是契约，全部完成且互不串', async () => {
-  // "NACAB 和 NACEB 的 AsyncTask 被设计为绝对能够并发启动，没有设置上限" —— README
+  // Contract: NACAB/NACEB AsyncTask starts are unbounded by design (README).
   const nacab = new NACAB()
   nacab.register({ name: 'id', description: 'x', execute: async (p) => { await sleep(1); return p.i } })
 
@@ -55,7 +48,7 @@ test('一半成功一半失败并发，两边都不影响对方', async () => {
   assert.ok(no.every((s, i) => s.reason.message === `e${i * 2 + 1}`), '每个失败带的是自己的错')
 })
 
-// ── 大 payload ──
+// ── large payloads ──
 
 test('1MB payload 进出 execute，字节级一致', async () => {
   const nacab = new NACAB()
@@ -75,7 +68,7 @@ test('1MB 二进制不被序列化污染', async () => {
   assert.equal(out.bin, bin, '同一个对象引用 —— NACAB 层内不做拷贝')
 })
 
-// ── handler 的退化返回 ──
+// ── degenerate handler returns ──
 
 test('execute 返回各种非常规值都原样传出', async () => {
   const nacab = new NACAB()
@@ -123,14 +116,14 @@ test('execute 返回 rejected promise 与 throw 等价', async () => {
 })
 
 test('execute 返回 pending 永不 settle 的 promise → invoke 也永不 settle', async () => {
-  // NACAB 无超时设计：一次能力调用多久算超时是业务的事。这条钉住「框架不会替你兜」。
+  // No timeout by design: timeout policy belongs to the caller.
   const nacab = new NACAB()
   nacab.register({ name: 'never', description: 'x', execute: () => new Promise(() => {}) })
   const race = await Promise.race([nacab.invoke('never', {}), sleep(150).then(() => 'STILL-PENDING')])
   assert.equal(race, 'STILL-PENDING', 'NACAB 不加超时，挂着就是挂着')
 })
 
-// ── 能力名的退化形状 ──
+// ── degenerate ability names ──
 
 test('能力名可以是任何非空字符串 —— NACAB 不解释名字', async () => {
   const nacab = new NACAB()
@@ -145,7 +138,7 @@ test('能力名可以是任何非空字符串 —— NACAB 不解释名字', asy
 })
 
 test('__proto__ / constructor 这类名字不污染原型', async () => {
-  // handlers 是 Map 而不是普通对象，所以这些名字只是普通 key。
+  // handlers is a Map, so such names stay plain keys.
   const nacab = new NACAB()
   nacab.register({ name: '__proto__', description: 'x', execute: () => 'proto-handler' })
   assert.equal(await nacab.invoke('__proto__', {}), 'proto-handler')
@@ -174,7 +167,7 @@ test('2000 个能力注册后 listAbility 与 invoke 都正常', async () => {
   console.log(`    2000 次 register: ${regMs.toFixed(1)}ms;  3 次查表 invoke: ${invMs.toFixed(2)}ms`)
 })
 
-// ── 观测面在高频下 ──
+// ── observation under load ──
 
 test('高频 invoke 时观测面事件数正比于调用数', async () => {
   const nacab = new NACAB()
@@ -194,7 +187,7 @@ test('高频 invoke 时观测面事件数正比于调用数', async () => {
 test('挂 100 个观测者时 invoke 仍不受影响', async () => {
   const nacab = new NACAB()
   nacab.register({ name: 'ok', description: 'x', execute: () => 'result' })
-  nacab.eventBus.onError = () => {}                       // 吃掉 maxListeners 警告
+  nacab.eventBus.onError = () => {}                       // swallow maxListeners warnings
   let fired = 0
   for (let i = 0; i < 100; i++) nacab.eventBusObs.listen('nacab:ability:done:after:*', () => fired++)
 
@@ -219,7 +212,7 @@ test('每个观测者都抛异常也不影响 invoke 与彼此', async () => {
   assert.equal(busErrs.events.length, 50, '50 条都进了 error:bus')
 })
 
-// ── adaptor 压力 ──
+// ── adaptor stress ──
 
 test('adaptor.push 5000 次并发，回调各归各位', async () => {
   const nacab = new NACAB()

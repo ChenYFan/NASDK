@@ -31,12 +31,18 @@ A 和 B 没有直接连接，消息实际经过 Gateway 转发。
 在 NApp 的 `opt` 中设置 `isGateway: true`，并为其他 NApp 提供一个传输入口：
 
 ```js
+import WebSocketServerProvider from '@nyirusu/nact-websocket-server'
+
 const gateway = new NApp({
   id: "gateway",
-  server: [{ type: "ws", opt: { ip: "127.0.0.1", port: 18900 } }],
+  server: [{
+    type: "websocket",
+    provider: { host: "127.0.0.1", port: 18900, path: "/nacp" },
+  }],
   opt: { isGateway: true }, // [!code focus]
 })
 
+gateway.nact.use(new WebSocketServerProvider())
 await gateway.start()
 ```
 
@@ -53,11 +59,15 @@ Gateway 仍然是一个 NApp，也可以拥有自己的 Event、Ability 和订�
 A 和 B 分别启动，然后使用 Gateway 的 App ID 和传输地址建立连接：
 
 ```js
+import WebSocketClientProvider from '@nyirusu/nact-websocket-client'
+
 const gatewayTransport = {
-  type: "ws",
-  opt: { ip: "127.0.0.1", port: 18900 },
+  type: "websocket",
+  provider: { url: "ws://127.0.0.1:18900/nacp" },
 }
 
+appA.nact.use(new WebSocketClientProvider())
+appB.nact.use(new WebSocketClientProvider())
 await appA.start()
 await appB.start()
 
@@ -99,9 +109,13 @@ console.log(response.payload)
 换句话说，Gateway就是兜底连接。
 :::
 
+:::info
+心跳与离线判定只覆盖直连。经 Gateway 到达的 NApp 不在本端链路表中，其存活由 Gateway 维持；本端与 Gateway 的连接是直连，同样有心跳。
+:::
+
 ## 消息如何转发
 
-Gateway 只转发 Package，不转换地址。请求经过 Gateway 时，Package 始终保持：
+Gateway 只转发 NACP 包，不转换地址。请求经过 Gateway 时，NACP 包始终保持：
 
 ```text
 A → Gateway → B    { from: "A", to: "B" }
@@ -113,7 +127,7 @@ B 返回的 Response、Notify 或其他消息则保持：
 B → Gateway → A    { from: "B", to: "A" }
 ```
 
-Gateway 只读取当前 Package 的 `to` 来选择下一跳，不改写 `from` 和 `to`，也不代替 B 返回 Response。
+Gateway 只读取当前 NACP 包的 `to` 来选择下一跳，不改写 `from` 和 `to`，也不代替 B 返回 Response。
 
 :::tip
 这就是为什么它不是 NAT，Gateway 也不需要保存 A 与 B 之间的请求映射。
@@ -134,7 +148,7 @@ const app = new NApp({
 
 此时后连接的 Gateway 会被当作普通直连 NApp，不会承担本 NApp 的兜底路由。
 
-_截止**v1.0.3**版本_，两个 `isGateway: true` 的 NApp 不能互相注册，即使降级为普通节点。尝试连接会产生`dual-gateway`错误。
+_截止**v1.0.4**版本_，两个 `isGateway: true` 的 NApp 不能互相注册，即使降级为普通节点。尝试连接会产生`dual-gateway`错误。
 
 :::details 关于Gateway NAT
 未来计划可能会涉及到类似NAT的地址转换，但目前暂时不考虑支持。

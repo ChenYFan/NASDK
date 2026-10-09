@@ -1,19 +1,6 @@
-/**
- * NACEB — Nyirusu Application Control Event Bus. The assembly.
- *
- * Three FSMControllers sit side by side under NACEB, "asking" each other via lazy getters that NACEB
- * injects. alertTick self-locks (ticking flag held across awaits) and each tick awaits the three
- * controller.nextTick() in order (task → pipeline → event). Queues hold full instance objects across
- * all three layers: the object IS the state IS the capability.
- *
- * Transition is uniform, two-beat:
- *   before: emit `naceb:{layer}:{state}:before:{id}` + await user beforeT{State} hook (may intervene/veto)
- *   mutate state
- *   after : emit `naceb:{layer}:{state}:after:{id}`  + run user afterT{State} hook
- *
- * Result delivery: NACEB never broadcasts final. The terminal signal rides the done/failure transition
- * event + afterT{Done|Failure} hook; the terminal result is taken solely via consumeEvent(id)'s return value.
- */
+// Tick order: task → pipeline → event; queues hold full instance objects across all three layers.
+// Transition (two-beat): emit `naceb:{layer}:{state}:before:{id}` + beforeT hook → mutate state →
+// emit after event + afterT hook. Final is never broadcast: take it via consumeEvent(id).
 
 import { EventBus, readonlyView } from '../EventBus.ts'
 import type { ReadonlyBus } from '../EventBus.ts'
@@ -57,7 +44,7 @@ export class NACEB {
   private clock: ReturnType<typeof setInterval> | null = null
   private ticking = false
   private _emit: RuntimeEmit
-  private ref!: NACEBPrivateRef   // 私有能力盒，构造内填充后注入三个 Controller
+  private ref!: NACEBPrivateRef
   private _nacpAdaptor: NACPAdaptor | null = null
 
   constructor(opts: {
@@ -65,8 +52,6 @@ export class NACEB {
     pipelineHandlers: PipelineHandler[]
     taskHandlers: TaskHandler[]
   }) {
-    // Unified internal channel: every runtime signal is an EventBus event `naceb:runtime:{level}:{id}`;
-    // nothing printed by default.
     this._emit = (level, id, payload) => this.eventBus.emit(`naceb:runtime:${level}:${id}`, payload)
     this.eventBus.onError = (key, err) =>
       this.eventBus.emit(`naceb:runtime:error:bus`, { layer: 'bus', id: 'bus', msg: `observer error @${key}: ${(err as any)?.message ?? String(err)}`, opt: { key, error: err } })
@@ -85,7 +70,7 @@ export class NACEB {
       }
     }
 
-    // ref: NACEB's private-capability box, injected into the three controllers.
+    // Private-capability box injected into the three controllers.
     this.ref = {
       THookHandler,
       emit: this._emit,
@@ -95,7 +80,7 @@ export class NACEB {
       alertTick: (from: string) => this.alertTick(from),
       ensureClock: () => this.ensureClock(),
       forceCleanEventUnderLayer: (eventId: string) => this.forceCleanEventUnderLayer(eventId),
-      taskController: undefined as any,               // 下面 new 出来后回填
+      taskController: undefined as any,
       pipelineController: () => this.pipelineController,
       eventController: () => this.eventController,
     }
@@ -103,7 +88,7 @@ export class NACEB {
     this.taskController = new TaskFSMController(this, this.ref)
     this.pipelineController = new PipelineFSMController(this, this.ref)
     this.eventController = new EventFSMController(this, this.ref)
-    this.ref.taskController = this.taskController      // 回填（Task 无构造环，直接持引用）
+    this.ref.taskController = this.taskController
 
     const ref: NACEBRef = {
       pushEvent: (e, o) => this.pushEvent(e, o),
@@ -118,8 +103,6 @@ export class NACEB {
   registerEventAlias(alias: EventAlias) { this.eventAlias.register(alias) }
   on<K extends keyof NACEBHooks>(hook: K, fn: NonNullable<NACEBHooks[K]>) { (this.hooks as any)[hook] = fn }
 
-  /** Read-only observation view of the internal EventBus (subscribe/unsubscribe only, no emit).
-   *  Internally NACEB uses this.eventBus directly; external consumers get this view. */
   get eventBusObs(): ReadonlyBus { return this.eventBus.readonly }
 
   pushEvent(input: Omit<EventInterface, 'id' | 'name' | 'pipelineName'> & { id?: string; name?: string; pipelineName?: string }, opts?: PushOpts): string {
@@ -152,11 +135,7 @@ export class NACEB {
   listEvent(): EventInstance[] { return this.eventController.queue.slice() }
   consumeEvent(id: string): unknown { return this.eventController.consume(id) }
 
-  /**
-   * Force-clean one event's lower live orphans (task + pipeline), called from the event layer's crash chain.
-   * Fully blocking, same-beat: stop each task (force bypasses the builtin $ refusal) → consume task →
-   * consume pipeline. Does not touch the event's own failure.
-   */
+  // Stop each task (force bypasses the builtin $ refusal) → consume task → consume pipeline.
   private async forceCleanEventUnderLayer(eventId: string): Promise<void> {
     for (const t of this.taskController.findTaskByEventId(eventId)) {
       if (t.status === 'running' || t.status === 'pending') await t._stop(true)
@@ -166,8 +145,7 @@ export class NACEB {
   }
 
   private async alertTick(_from: string = '?') {
-    // Collision (ticking=true) → drop this reminder; progression sources are redundant enough that a dropped
-    // reminder always has a follow-up (veto retry re-fires via self re-fire, not this reminder).
+    // Collision → drop; a dropped reminder always has a follow-up.
     if (this.ticking) return
     this.ticking = true
     let moved = false
@@ -177,7 +155,7 @@ export class NACEB {
       const e = await this.eventController.nextTick()
       moved = t || p || e
     } finally { this.ticking = false }
-    // moved → re-fire a beat. This is the single re-fire point.
+    // moved → re-fire a beat; this is the single re-fire point.
     if (moved) {
       setTimeout(() => this.alertTick('self'), 0)
     }

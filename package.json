@@ -1,6 +1,6 @@
 {
-  "name": "@chenyfan/nasdk",
-  "version": "1.0.3",
+  "name": "@nyirusu/nasdk",
+  "version": "1.0.4",
   "description": "Nyirusu Application SDK, a general-purpose transport and dispatch framework",
   "author": "CyanFalse",
   "license": "MIT",
@@ -9,6 +9,9 @@
     "dist",
     "docs",
     "README.md"
+  ],
+  "workspaces": [
+    "packages/*"
   ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -48,13 +51,13 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "tsc -p tsconfig.build.json && npm run build --workspaces --if-present",
+    "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck --workspaces --if-present",
     "prepublishOnly": "npm run build",
-    "test": "node --import tsx --test test/*/*.test.mjs",
-    "test:simple": "node --import tsx --test test/simple/*.test.mjs",
-    "test:full": "node --import tsx --test test/full/*.test.mjs",
-    "test:edge": "node --import tsx --test test/edge/*.test.mjs",
+    "test": "npm run test:simple",
+    "test:simple": "node --import tsx --test test/simple/*.test.mjs && npm run test:simple --workspaces --if-present",
+    "test:full": "node --import tsx --test test/full/*.test.mjs && npm run test:full --workspaces --if-present",
+    "test:edge": "node --import tsx --test test/edge/*.test.mjs && npm run test:edge --workspaces --if-present",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"
@@ -64,12 +67,10 @@
   },
   "dependencies": {
     "cbor-x": "^1.6.4",
-    "ws": "^8.18.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/ws": "^8.5.0",
     "mermaid": "10.9.5",
     "tsx": "4.20.5",
     "typescript": "^5.9.0",

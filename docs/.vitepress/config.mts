@@ -175,14 +175,16 @@ export default defineConfig({
         {
           text: "NACT",
           items: [
-            { text: "NACT Framing", link: "/transport/nact/framing" },
-            { text: "底层传输", link: "/transport/nact/transport" },
             { text: "入站与出站", link: "/transport/nact/inbound-outbound" },
+            { text: "NACT Framing", link: "/transport/nact/framing" },
+            { text: "传输 Provider", link: "/transport/nact/provider" },
+            { text: "运行时接入", link: "/transport/nact/runtime-build" },
             {
               text: "进阶",
               items: [
                 { text: "生命周期", link: "/transport/nact/lifecycle" },
                 { text: "可观测", link: "/transport/nact/observability" },
+                { text: "自定义 Provider", link: "/transport/nact/custom-provider" },
               ],
             },
           ],

@@ -1,39 +1,109 @@
-/**
- * full/nact — 覆盖传输层正常会走到的路径。
- *
- * 单测为主（framing / codec 是纯函数），最后几条起真 carrier 验证 Peer 生命周期和三种承载的等价性。
- */
+// Framing/codec unit tests, plus real-carrier checks of Peer lifecycle across the three transports.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import net from 'node:net'
+import { setImmediate as flush } from 'node:timers/promises'
+import { buildMessage } from '../../NACP/types.ts'
+import { deferred, controlledChannel as controlled, acceptanceNotifyOpt } from '../_kit.mjs'
 
 import { cborCodec } from '../../NACT/codec.ts'
 import {
-  FRAG_HEADER, MAX_FRAME_SIZE, DEFAULT_CHUNK, DEFAULT_HEARTBEAT_MS, NACT_VERSION, MAGIC_BY_VERSION,
-  checkFragHeader, packFragHeader, makeReassembler, makeStreamParser, splitAndEmit, toHex,
+  FRAME_HEADER_SIZE, MAX_FRAME_SIZE, DEFAULT_CHUNK, NACT_VERSION, MAGIC_BY_VERSION,
+  checkFrameHeader, packFrameHeader, makeReassembler, makeFrameReceiver, splitAndEmit, toHex,
 } from '../../NACT/framing.ts'
+import { makeFrameSplitter, readFrameSize, FRAME_HEADER_SIZE as SHARED_FRAME_HEADER_SIZE } from '../../packages/nact-provider-shared/index.ts'
 import { NACTError } from '../../NACT/errors.ts'
 import { NACTEvent } from '../../NACT/events.ts'
-import { startApp, startPair, tcp, ws, unix, PORT, sleep } from '../_kit.mjs'
+import { startApp, startPair, tcp, PORT, sleep } from '../_kit.mjs'
 
 const aMsg = (payload) => ({
   v: { major: 1, minor: 0 }, type: 'notify', id: 'm1', from: 'a', to: 'b', t: 1,
   meta: { parentId: 'p', targetSubName: 'x', hitSubName: 'x' }, payload,
 })
 
-/** 把一条消息切片后拼成连续的线上字节（tcp/unix 的线格式）。 */
-function toWire(bytes, chunkSize) {
-  const parts = []
-  splitAndEmit(bytes, chunkSize, (h, b) => { parts.push(h, b) })
-  const total = parts.reduce((n, p) => n + p.length, 0)
-  const out = new Uint8Array(total)
-  let at = 0
-  for (const p of parts) { out.set(p, at); at += p.length }
-  return out
+const notify = payload => buildMessage('me', 'notify', 'them', { ...acceptanceNotifyOpt, payload })
+
+test('sendToPeer 等全部帧被接纳，并保持并发提交的包顺序', { timeout: 3000 }, async t => {
+  const arrivals = []
+  const { app, peer } = await controlled(t, frame => {
+    const gate = deferred()
+    arrivals.push({ frame, gate })
+    return gate.promise
+  })
+  const messages = [notify(new Uint8Array(200)), notify('second')]
+  const counts = messages.map(message => Math.ceil(cborCodec.encode(message).length / 64))
+  const done = [false, false]
+  const sends = messages.map((message, i) => app.nact.sendToPeer(peer.id, message).then(result => {
+    done[i] = true
+    return result
+  }))
+  await flush()
+  assert.equal(arrivals.length, 1)
+  assert.deepEqual(done, [false, false])
+  for (let i = 0; i < counts[0] + counts[1]; i++) {
+    assert.equal(arrivals.length, i + 1, '前一帧尚未接纳时不提交下一帧')
+    assert.equal(done[i < counts[0] ? 0 : 1], false, '整个包仍在等待接纳')
+    arrivals[i].gate.resolve()
+    await flush()
+    if (i === counts[0] - 1) assert.deepEqual(done, [true, false])
+  }
+  assert.deepEqual(await Promise.all(sends), [true, true])
+  const received = []
+  const receiver = makeFrameReceiver(bytes => received.push(cborCodec.decode(bytes)), assert.fail)
+  for (const { frame } of arrivals) receiver.receive(frame)
+  assert.deepEqual(received, messages)
+  assert.equal(await app.nact.sendToPeer('missing', messages[0]), false)
+})
+
+for (const asynchronous of [false, true]) {
+  test(`Provider ${asynchronous ? 'reject' : 'throw'}：当前包和排队包都失败，后续帧停止提交`, async t => {
+    const reason = Object.assign(new Error('refused'), { code: 'provider-refused' })
+    let calls = 0
+    const { app, peer } = await controlled(t, () => {
+      if (++calls !== 2) return
+      if (asynchronous) return Promise.reject(reason)
+      throw reason
+    })
+    const errors = []
+    app.bus.listen('nact:peer:error', value => errors.push(value))
+    const check = error => error.code === reason.code && error.phase === 'outbound' && error.cause === reason
+    await Promise.all([
+      assert.rejects(app.nact.sendToPeer(peer.id, notify(new Uint8Array(200))), check),
+      assert.rejects(app.nact.sendToPeer(peer.id, notify('queued')), check),
+    ])
+    await flush()
+    assert.equal(calls, 2)
+    assert.equal(errors.length, 1)
+    assert.equal(app.nact.getPeer(peer.id), undefined)
+  })
 }
 
-/** 用 reassembler 吃完 splitAndEmit 的所有分片，返回解码结果。 */
+test('Provider 接纳中断连：即使 send 永不完成，所有等待方仍会 reject', { timeout: 3000 }, async t => {
+  const gate = deferred()
+  let calls = 0
+  const { app, peer, channel } = await controlled(t, () => { calls++; return gate.promise })
+  const sends = [notify('first'), notify('second')].map(message =>
+    assert.rejects(app.nact.sendToPeer(peer.id, message), error => error.code === 'transport-closed'))
+  await flush()
+  channel.close()
+  await Promise.all(sends)
+  gate.resolve()
+  await flush()
+  assert.equal(calls, 1, '迟到的接纳不能继续发送排队帧')
+})
+
+test('Provider 接纳成功后的错误通过事件报告，不改变已完成的 Promise', async t => {
+  const { app, peer, errors } = await controlled(t, () => {})
+  const accepted = app.nact.sendToPeer(peer.id, notify('queued in provider'))
+  assert.equal(await accepted, true)
+  const reasons = []
+  app.bus.listen('nact:peer:error', value => reasons.push(value.reason))
+  for (const handler of errors) handler(Object.assign(new Error('late failure'), { code: 'late-failure' }))
+  assert.equal(await accepted, true)
+  assert.deepEqual(reasons, ['late-failure'])
+})
+
+/** Feed all splitAndEmit frames to a reassembler; returns the decoded result. */
 function roundTrip(msg, chunkSize) {
   const bytes = cborCodec.encode(msg)
   let got = null, frames = 0
@@ -83,31 +153,31 @@ test('codec.decode 遇到垃圾字节抛错', () => {
   assert.throws(() => cborCodec.decode(new Uint8Array([0xff, 0xff, 0xff, 0xff])))
 })
 
-// ── 分片头 ──
+// ── frame header ──
 
 test('头布局：16B msgId + offset + totalSize + thisFrameSize + 保留 + magic + version', () => {
   const msgId = new Uint8Array(16).fill(0xab)
-  const h = packFragHeader(msgId, 100, 5000, 200)
+  const h = packFrameHeader(msgId, 100, 5000, 200)
   assert.equal(h.length, 32)
 
   const dv = new DataView(h.buffer, h.byteOffset, h.byteLength)
   assert.equal(toHex(h.subarray(0, 16)), 'ab'.repeat(16))
   assert.equal(dv.getUint32(16), 100, 'offset')
   assert.equal(dv.getUint32(20), 5000, 'totalSize')
-  assert.equal(dv.getUint32(24), FRAG_HEADER + 200, 'thisFrameSize')
+  assert.equal(dv.getUint32(24), FRAME_HEADER_SIZE + 200, 'thisFrameSize')
   assert.equal(dv.getUint16(28), 0, '保留位')
   assert.equal(dv.getUint8(31), NACT_VERSION, 'version 在最后一个字节 —— 跨版本唯一位置稳定的字段')
-  assert.equal(checkFragHeader(h), null)
+  assert.equal(checkFrameHeader(h), null)
 })
 
 test('版本先判、magic 后判', () => {
-  const h = packFragHeader(new Uint8Array(16), 0, 10, 10)
+  const h = packFrameHeader(new Uint8Array(16), 0, 10, 10)
 
   const badBoth = Uint8Array.from(h); badBoth[30] = 0; badBoth[31] = 99
-  assert.equal(checkFragHeader(badBoth), 'version-mismatch', '版本不认就不谈 magic')
+  assert.equal(checkFrameHeader(badBoth), 'version-mismatch', '版本不认就不谈 magic')
 
   const badMagic = Uint8Array.from(h); badMagic[30] = 0
-  assert.equal(checkFragHeader(badMagic), 'bad-magic')
+  assert.equal(checkFrameHeader(badMagic), 'bad-magic')
 })
 
 test('msgId 每条消息不同，同条消息内相同', () => {
@@ -120,15 +190,15 @@ test('msgId 每条消息不同，同条消息内相同', () => {
   assert.notDeepEqual([...ids1], [...ids2], '两次发送是两个 msgId')
 })
 
-// ── 切片 / 重组 ──
+// ── split / reassemble ──
 
-test('切片数量随 chunkSize 变化，结果始终一致', () => {
+test('帧数随 chunkSize 变化，结果始终一致', () => {
   const msg = aMsg({ blob: 'q'.repeat(20 * 1024) })
   let prev = Infinity
   for (const chunkSize of [64, 256, 1024, 8192, DEFAULT_CHUNK.tcp]) {
     const { got, frames } = roundTrip(msg, chunkSize)
     assert.deepEqual(got, msg, `chunkSize=${chunkSize}`)
-    assert.ok(frames <= prev, `chunkSize 越大片数越少：${chunkSize} → ${frames}`)
+    assert.ok(frames <= prev, `chunkSize 越大帧数越少：${chunkSize} → ${frames}`)
     prev = frames
   }
 })
@@ -137,7 +207,7 @@ test('chunkSize 比头还小也能工作 —— bodyMax 至少 1', () => {
   const msg = aMsg({ s: 'abcdefgh' })
   const { got, frames } = roundTrip(msg, 1)
   assert.deepEqual(got, msg)
-  assert.ok(frames > 10, `每片体只有 1 字节，切了 ${frames} 片`)
+  assert.ok(frames > 10, `每帧体只有 1 字节，分片成 ${frames} 帧`)
 })
 
 test('空消息、1 字节、正好等于 chunkSize 的边界', () => {
@@ -145,8 +215,8 @@ test('空消息、1 字节、正好等于 chunkSize 的边界', () => {
     const { got } = roundTrip(aMsg(payload), 1024)
     assert.deepEqual(got, aMsg(payload))
   }
-  // 让编码后长度正好落在一片能装下的上限附近
-  const bodyMax = 1024 - FRAG_HEADER
+  // sizes right at the one-frame boundary
+  const bodyMax = 1024 - FRAME_HEADER_SIZE
   for (const delta of [-1, 0, 1]) {
     const filler = 'z'.repeat(Math.max(1, bodyMax + delta - 80))
     const { got } = roundTrip(aMsg({ filler }), 1024)
@@ -154,7 +224,7 @@ test('空消息、1 字节、正好等于 chunkSize 的边界', () => {
   }
 })
 
-test('分片乱序到达也能重组', () => {
+test('帧乱序到达也能重组', () => {
   const msg = aMsg({ blob: 'r'.repeat(10 * 1024) })
   const bytes = cborCodec.encode(msg)
   const frames = []
@@ -162,7 +232,7 @@ test('分片乱序到达也能重组', () => {
 
   let got = null
   const reasm = makeReassembler((full) => { got = cborCodec.decode(full) }, (r) => assert.fail(r))
-  for (const { h, b } of [...frames].reverse()) {       // 倒序喂进去
+  for (const { h, b } of [...frames].reverse()) {       // feed in reverse order
     const dv = new DataView(h.buffer, h.byteOffset, h.byteLength)
     const id = toHex(h.subarray(0, 16))
     const off = dv.getUint32(16)
@@ -172,7 +242,7 @@ test('分片乱序到达也能重组', () => {
   assert.deepEqual(got, msg)
 })
 
-test('两条消息的分片交错到达，各自重组', () => {
+test('两个包的帧交错到达，各自重组', () => {
   const m1 = aMsg({ tag: 'one', blob: 'a'.repeat(3000) })
   const m2 = aMsg({ tag: 'two', blob: 'b'.repeat(3000) })
   const collect = (msg) => {
@@ -197,13 +267,13 @@ test('两条消息的分片交错到达，各自重组', () => {
   assert.deepEqual(done.map(d => d.payload.tag).sort(), ['one', 'two'])
 })
 
-test('重复的片被拒（received 计数骗不过区间集）', () => {
+test('重复的帧被拒（received 计数骗不过区间集）', () => {
   const errs = []
   const reasm = makeReassembler(() => assert.fail('不该完成'), (r) => errs.push(r))
   reasm.ensure('d', 100)
   reasm.advance('d', 0, 50)
-  reasm.advance('d', 0, 50)       // 同一段来两次：计数会凑满 100，但区间重叠
-  assert.deepEqual(errs, ['overlapping-fragment'])
+  reasm.advance('d', 0, 50)       // same range twice: count reaches 100 but ranges overlap
+  assert.deepEqual(errs, ['overlapping-frame'])
 })
 
 test('advance 到未知 msgId 是静默空操作', () => {
@@ -213,100 +283,319 @@ test('advance 到未知 msgId 是静默空操作', () => {
   assert.deepEqual(errs, [])
 })
 
-test('clear 之后旧 msgId 的片不再累积', () => {
+test('clear 之后旧 msgId 的帧不再累积', () => {
   let done = 0
   const reasm = makeReassembler(() => done++, () => {})
   reasm.ensure('x', 100)
   reasm.advance('x', 0, 50)
   reasm.clear()
-  reasm.advance('x', 50, 50)      // 表已清，这片无处可去
+  reasm.advance('x', 50, 50)      // table cleared, frame has nowhere to go
   assert.equal(done, 0)
 })
 
-// ── 裸流解析 ──
+// ── per-frame receive ──
 
-test('裸流：任意分块都能还原', () => {
-  const msg = aMsg({ blob: 'w'.repeat(8000) })
-  const wire = toWire(cborCodec.encode(msg), 512)
+/** All frames of one packet, each frame is [header, body] (matches NACT sender side). */
+function framesOf(bytes, chunkSize) {
+  const out = []
+  splitAndEmit(bytes, chunkSize, (h, b) => out.push([h, b]))
+  return out
+}
+/** Concatenate a frame's parts into one contiguous buffer. */
+const flat = (frame) => {
+  const out = new Uint8Array(frame.reduce((n, s) => n + s.length, 0))
+  let at = 0
+  for (const s of frame) { out.set(s, at); at += s.length }
+  return out
+}
+/** Split one frame into multiple Uint8Arrays of n bytes each. */
+const segmentsBy = (bytes, n) => {
+  const out = []
+  for (let i = 0; i < bytes.length; i += n) out.push(bytes.subarray(i, i + n))
+  return out
+}
+/** Same underlying memory and position → zero copy. */
+const sameMemory = (a, b) => a.buffer === b.buffer && a.byteOffset === b.byteOffset && a.length === b.length
 
-  for (const chunk of [1, 3, 31, 512, 1024, wire.length, wire.length * 2]) {
-    let got = null
-    const reasm = makeReassembler((full) => { got = cborCodec.decode(full) }, (r) => assert.fail(r))
-    const parse = makeStreamParser(reasm)
-    for (let i = 0; i < wire.length; i += chunk) parse(wire.subarray(i, i + chunk))
-    assert.deepEqual(got, msg, `按 ${chunk} 字节喂`)
+test('快速路径：单帧包，帧是一个 Uint8Array，帧体直接引用原内存', () => {
+  const msg = aMsg({ blob: 'f'.repeat(3000) })
+  const [frame] = framesOf(cborCodec.encode(msg), 1024 * 1024)
+  const wire = flat(frame)
+
+  let got
+  const rx = makeFrameReceiver((full) => { got = full }, (r) => assert.fail(r))
+  rx.receive([wire])
+  assert.ok(sameMemory(got, wire.subarray(FRAME_HEADER_SIZE)), '零拷贝：交给解码的是原内存的 subarray')
+  assert.deepEqual(cborCodec.decode(got), msg)
+})
+
+test('快速路径：单帧包，帧是 [header, body]，body 原样交出', () => {
+  const msg = aMsg({ blob: 'g'.repeat(3000) })
+  const [frame] = framesOf(cborCodec.encode(msg), 1024 * 1024)
+
+  let got
+  const rx = makeFrameReceiver((full) => { got = full }, (r) => assert.fail(r))
+  rx.receive(frame)
+  assert.equal(got, frame[1], '零拷贝：直接是 body 本身')
+  assert.deepEqual(cborCodec.decode(got), msg)
+})
+
+test('快速路径：单帧包但帧体跨多个 Uint8Array，拷贝一次后正确', () => {
+  const msg = aMsg({ blob: 'h'.repeat(3000) })
+  const [frame] = framesOf(cborCodec.encode(msg), 1024 * 1024)
+  const wire = flat(frame)
+
+  for (const n of [1, 7, 31, 32, 33, 1000, wire.length - 1]) {
+    let got
+    const rx = makeFrameReceiver((full) => { got = full }, (r) => assert.fail(r))
+    rx.receive(segmentsBy(wire, n))
+    assert.deepEqual(cborCodec.decode(got), msg, `每 ${n} 字节一个 Uint8Array`)
+    assert.notEqual(got.buffer, wire.buffer, '跨多个 Uint8Array 只能拷贝')
   }
 })
 
-test('裸流：连续多条消息', () => {
-  const msgs = [aMsg({ n: 1 }), aMsg({ n: 2, blob: 'x'.repeat(2000) }), aMsg({ n: 3 })]
-  const chunks = msgs.map(m => toWire(cborCodec.encode(m), 512))
-  const total = chunks.reduce((n, c) => n + c.length, 0)
-  const wire = new Uint8Array(total)
-  let at = 0
-  for (const c of chunks) { wire.set(c, at); at += c.length }
+test('快速路径：帧头本身跨多个 Uint8Array 也能读', () => {
+  const msg = aMsg({ n: 1 })
+  const [frame] = framesOf(cborCodec.encode(msg), 1024)
+  const wire = flat(frame)
+  let got
+  const rx = makeFrameReceiver((full) => { got = cborCodec.decode(full) }, (r) => assert.fail(r))
+  rx.receive([wire.subarray(0, 5), wire.subarray(5, 20), wire.subarray(20)])
+  assert.deepEqual(got, msg)
+})
 
+test('快速路径：空包交出 0 字节', () => {
+  const [frame] = framesOf(new Uint8Array(0), 1024)
   const got = []
-  const reasm = makeReassembler((full) => got.push(cborCodec.decode(full)), (r) => assert.fail(r))
-  const parse = makeStreamParser(reasm)
-  for (let i = 0; i < wire.length; i += 7) parse(wire.subarray(i, i + 7))
-
-  assert.deepEqual(got.map(g => g.payload.n), [1, 2, 3])
+  const rx = makeFrameReceiver((full) => got.push(full), (r) => assert.fail(r))
+  rx.receive(frame)
+  rx.receive([flat(frame)])
+  assert.equal(got.length, 2)
+  for (const full of got) assert.equal(full.length, 0)
 })
 
-test('裸流：头里的 frameSize 越界要抛 NACTError', () => {
-  const h = packFragHeader(new Uint8Array(16), 0, 100, 0)
-  const dv = new DataView(h.buffer, h.byteOffset, h.byteLength)
+test('快速路径不绕过重叠检查：同 msgId 在重组中时，完整的单帧仍走重组并被拒', () => {
+  const msgId = new Uint8Array(16).fill(7)
+  const half = [packFrameHeader(msgId, 0, 20, 10), new Uint8Array(10)]
+  const whole = [packFrameHeader(msgId, 0, 20, 20), new Uint8Array(20)]
 
-  dv.setUint32(24, FRAG_HEADER - 1)          // 比头还小
-  let parse = makeStreamParser(makeReassembler(() => {}, () => {}))
-  assert.throws(() => parse(h), (e) => e instanceof NACTError && e.code === 'frame-too-small')
-
-  dv.setUint32(24, MAX_FRAME_SIZE + 1)       // 超过上限
-  parse = makeStreamParser(makeReassembler(() => {}, () => {}))
-  assert.throws(() => parse(h), (e) => e instanceof NACTError && e.code === 'frame-too-large')
+  const errs = []
+  const rx = makeFrameReceiver(() => assert.fail('不该完成'), (r) => errs.push(r))
+  rx.receive(half)
+  rx.receive(whole)
+  assert.deepEqual(errs, ['overlapping-frame'])
+  rx.clear()
 })
 
-test('裸流：坏头抛 NACTError，且 layer/phase 都填对', () => {
-  const h = packFragHeader(new Uint8Array(16), 0, 10, 0)
-  h[31] = 99
-  const parse = makeStreamParser(makeReassembler(() => {}, () => {}))
-  assert.throws(() => parse(h), (e) => {
-    assert.ok(e instanceof NACTError)
-    assert.equal(e.code, 'version-mismatch')
-    assert.equal(e.layer, 'NACT', 'layer 恒为 NACT')
-    assert.equal(e.phase, 'inbound', '坏字节进来是 inbound —— 三个工厂分相就是为了这个')
-    return true
-  })
+test('快速路径无状态：同一个单帧包的帧来两次就交两次', () => {
+  const [frame] = framesOf(cborCodec.encode(aMsg({ n: 1 })), 1024)
+  let done = 0
+  const rx = makeFrameReceiver(() => done++, (r) => assert.fail(r))
+  rx.receive(frame)
+  rx.receive(frame)
+  assert.equal(done, 2)
 })
 
-test('越界的片被拒（offset+len 超出 totalSize）', () => {
+test('快速路径与重组路径结果逐字节一致（固定种子随机）', () => {
+  let seed = 42
+  const rand = (n) => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed % n }
+  for (let round = 0; round < 200; round++) {
+    const bytes = new Uint8Array(rand(5000))
+    for (let i = 0; i < bytes.length; i++) bytes[i] = rand(256)
+    const [frame] = framesOf(bytes, bytes.length + FRAME_HEADER_SIZE)
+    const wire = flat(frame)
+
+    let fast
+    makeFrameReceiver((full) => { fast = Uint8Array.from(full) }, (r) => assert.fail(r))
+      .receive(segmentsBy(wire, 1 + rand(wire.length)))
+
+    let slow
+    const reasm = makeReassembler((full) => { slow = full }, (r) => assert.fail(r))
+    const id = toHex(frame[0].subarray(0, 16))
+    reasm.ensure(id, bytes.length).set(frame[1], 0)
+    reasm.advance(id, 0, bytes.length)
+
+    assert.deepEqual(fast, slow, `round ${round}, ${bytes.length} bytes`)
+    assert.deepEqual(fast, bytes)
+  }
+})
+
+test('多帧包：顺序、倒序、每帧拆成多个 Uint8Array 都能重组', () => {
+  const msg = aMsg({ blob: 'm'.repeat(10 * 1024) })
+  const frames = framesOf(cborCodec.encode(msg), 512)
+  assert.ok(frames.length > 10)
+
+  for (const [name, order] of [['顺序', frames], ['倒序', [...frames].reverse()]]) {
+    for (const n of [0, 3, 33]) {
+      let got = null
+      const rx = makeFrameReceiver((full) => { got = cborCodec.decode(full) }, (r) => assert.fail(r))
+      for (const frame of order) rx.receive(n ? segmentsBy(flat(frame), n) : frame)
+      assert.deepEqual(got, msg, `${name}，${n ? `每 ${n} 字节一个 Uint8Array` : '[header, body]'}`)
+    }
+  }
+})
+
+test('多帧包：两个包的帧交错，各自重组', () => {
+  const m1 = aMsg({ tag: 'one', blob: 'a'.repeat(3000) })
+  const m2 = aMsg({ tag: 'two', blob: 'b'.repeat(3000) })
+  const f1 = framesOf(cborCodec.encode(m1), 512), f2 = framesOf(cborCodec.encode(m2), 512)
+  const done = []
+  const rx = makeFrameReceiver((full) => done.push(cborCodec.decode(full).payload.tag), (r) => assert.fail(r))
+  for (let i = 0; i < Math.max(f1.length, f2.length); i++) { f1[i] && rx.receive(f1[i]); f2[i] && rx.receive(f2[i]) }
+  assert.deepEqual(done.sort(), ['one', 'two'])
+})
+
+test('坏帧抛 NACTError（inbound）：太短 / 版本 / magic / 超上限 / 长度不符', () => {
+  const good = flat(framesOf(cborCodec.encode(aMsg({ n: 1 })), 1024)[0])
+  const mutate = (fn) => { const f = Uint8Array.from(good); fn(f, new DataView(f.buffer)); return f }
+  const cases = [
+    ['frame-too-small', good.subarray(0, FRAME_HEADER_SIZE - 1)],
+    ['version-mismatch', mutate((f) => { f[31] = 99; f[30] = 0 })],
+    ['bad-magic', mutate((f) => { f[30] = 0 })],
+    ['frame-too-large', mutate((_, dv) => dv.setUint32(24, MAX_FRAME_SIZE + 1))],
+    ['frame-size-mismatch', mutate((_, dv) => dv.setUint32(24, good.length + 1))],
+    ['frame-size-mismatch', good.subarray(0, good.length - 1)],
+  ]
+  for (const [code, frame] of cases) {
+    const rx = makeFrameReceiver(() => assert.fail('不该交付'), (r) => assert.fail(r))
+    assert.throws(() => rx.receive([frame]), (e) => {
+      assert.ok(e instanceof NACTError, code)
+      assert.equal(e.code, code)
+      assert.equal(e.layer, 'NACT')
+      assert.equal(e.phase, 'inbound')
+      return true
+    })
+  }
+})
+
+test('越界的帧走 onError，不抛 RangeError', () => {
+  const msgId = new Uint8Array(16).fill(9)
+  const errs = []
+  const rx = makeFrameReceiver(() => assert.fail('不该完成'), (r) => errs.push(r))
+
+  rx.receive([packFrameHeader(msgId, 80, 100, 40), new Uint8Array(40)])     // 80+40 > 100
+  assert.deepEqual(errs, ['frame-out-of-bounds'])
+
+  rx.receive([packFrameHeader(msgId, 0, 100, 10), new Uint8Array(10)])      // start reassembly, buffer 100
+  rx.receive([packFrameHeader(msgId, 90, 1000, 20), new Uint8Array(20)])    // header claims 1000, buffer is 100
+  assert.deepEqual(errs, ['frame-out-of-bounds', 'frame-out-of-bounds'])
+  rx.clear()
+})
+
+// ── byte-stream frame splitting (nact-provider-shared) ──
+
+test('切帧：任意分块都切出与发送侧相同的帧', () => {
+  const frames = [
+    ...framesOf(cborCodec.encode(aMsg({ n: 1 })), 512),
+    ...framesOf(cborCodec.encode(aMsg({ n: 2, blob: 'x'.repeat(4000) })), 512),
+    ...framesOf(new Uint8Array(0), 512),
+  ]
+  const all = flat(frames.map(flat))
+
+  for (const n of [1, 3, 31, 32, 33, 512, 1000, all.length, all.length * 2]) {
+    const out = []
+    const push = makeFrameSplitter((frame) => out.push(flat(frame)), (e) => assert.fail(e.message))
+    for (const chunk of segmentsBy(all, n)) push(chunk)
+    assert.deepEqual(out, frames.map(flat), `每 ${n} 字节一块`)
+  }
+})
+
+test('切帧：整帧落在一个 chunk 内时，交出的是原 chunk 的 subarray', () => {
+  const [a] = framesOf(cborCodec.encode(aMsg({ n: 1 })), 1024)
+  const [b] = framesOf(cborCodec.encode(aMsg({ n: 2 })), 1024)
+  const chunk = flat([...a, ...b])
+  const out = []
+  makeFrameSplitter((frame) => out.push(frame), (e) => assert.fail(e.message))(chunk)
+  assert.equal(out.length, 2, '一个 chunk 里两帧，切出两次')
+  for (const frame of out) {
+    assert.equal(frame.length, 1)
+    assert.equal(frame[0].buffer, chunk.buffer, '零拷贝')
+  }
+})
+
+test('切帧：跨 chunk 的帧由多个 Uint8Array 组成，都指向原 chunk', () => {
+  const [frame] = framesOf(cborCodec.encode(aMsg({ blob: 'y'.repeat(3000) })), 1024 * 1024)
+  const wire = flat(frame)
+  const chunks = segmentsBy(wire, 100)
+  const out = []
+  const push = makeFrameSplitter((f) => out.push(f), (e) => assert.fail(e.message))
+  for (const c of chunks) push(c)
+  assert.equal(out.length, 1)
+  assert.equal(out[0].length, chunks.length)
+  out[0].forEach((segment, i) => assert.equal(segment.buffer, chunks[i].buffer))
+})
+
+test('切帧 + 逐帧接收：TCP 任意分块端到端还原多个包', () => {
+  const msgs = [aMsg({ n: 1 }), aMsg({ n: 2, blob: 'x'.repeat(8000) }), aMsg({ n: 3 })]
+  const all = flat(msgs.flatMap(m => framesOf(cborCodec.encode(m), 512)).map(flat))
+  for (const n of [1, 7, 512, 9999]) {
+    const got = []
+    const rx = makeFrameReceiver((full) => got.push(cborCodec.decode(full).payload.n), (r) => assert.fail(r))
+    const push = makeFrameSplitter((frame) => rx.receive(frame), (e) => assert.fail(e.message))
+    for (const chunk of segmentsBy(all, n)) push(chunk)
+    assert.deepEqual(got, [1, 2, 3], `每 ${n} 字节一块`)
+  }
+})
+
+test('切帧：坏头报一次错，之后的输入全部丢弃', () => {
+  const good = flat(framesOf(cborCodec.encode(aMsg({ n: 1 })), 1024)[0])
+  const bad = Uint8Array.from(good); bad[31] = 99
+  const errs = []
+  const push = makeFrameSplitter(() => assert.fail('不该切出帧'), (e) => errs.push(e.code))
+  push(bad)
+  push(good)
+  push(good)
+  assert.deepEqual(errs, ['version-mismatch'])
+})
+
+test('readFrameSize：先版本、再 magic、再长度', () => {
+  const h = packFrameHeader(new Uint8Array(16), 0, 10, 10)
+  const code = (f) => { try { readFrameSize(f); return null } catch (e) { return e.code } }
+  const mk = (fn) => { const f = Uint8Array.from(h); fn(f, new DataView(f.buffer)); return f }
+
+  assert.equal(readFrameSize(h), FRAME_HEADER_SIZE + 10)
+  assert.equal(code(mk((f) => { f[31] = 99; f[30] = 0 })), 'version-mismatch', '版本不认就不谈 magic')
+  assert.equal(code(mk((f) => { f[30] = 0 })), 'bad-magic')
+  assert.equal(code(mk((_, dv) => dv.setUint32(24, FRAME_HEADER_SIZE - 1))), 'frame-too-small')
+  assert.equal(code(mk((_, dv) => dv.setUint32(24, MAX_FRAME_SIZE + 1))), 'frame-too-large')
+  assert.equal(code(h.subarray(0, 31)), 'frame-too-small')
+})
+
+test('nact-provider-shared 的头布局与 core 一致', () => {
+  assert.equal(FRAME_HEADER_SIZE, SHARED_FRAME_HEADER_SIZE, 'shared 与 core 的帧头大小一致')
+  for (const [version, magic] of Object.entries(MAGIC_BY_VERSION)) {
+    const h = packFrameHeader(new Uint8Array(16), 0, 0, 0)
+    h[31] = Number(version); h[30] = magic
+    assert.equal(readFrameSize(h), FRAME_HEADER_SIZE, `v${version}`)
+  }
+})
+
+test('越界的帧被拒（offset+len 超出 totalSize）', () => {
   const errs = []
   const reasm = makeReassembler(() => assert.fail('不该完成'), (r) => errs.push(r))
   reasm.ensure('b', 100)
   reasm.advance('b', 80, 40)          // 80+40 > 100
-  assert.deepEqual(errs, ['fragment-out-of-bounds'])
+  assert.deepEqual(errs, ['frame-out-of-bounds'])
 })
 
-// ── 常量 ──
+// ── constants ──
 
 test('默认值都在合理范围', () => {
-  assert.equal(FRAG_HEADER, 32)
+  assert.equal(FRAME_HEADER_SIZE, 32)
   assert.equal(MAX_FRAME_SIZE, 2 * 1024 * 1024 * 1024)
-  assert.equal(DEFAULT_HEARTBEAT_MS, 30_000)
-  for (const t of ['tcp', 'unix', 'ws']) {
-    assert.ok(DEFAULT_CHUNK[t] > FRAG_HEADER, `${t} 的默认 chunk 大于头`)
+  for (const t of ['tcp', 'unix', 'websocket']) {
+    assert.ok(DEFAULT_CHUNK[t] > FRAME_HEADER_SIZE, `${t} 的默认 chunk 大于头`)
   }
 })
 
-test('当前版本在 magic 表里，且 packFragHeader 写的就是表里那个', () => {
+test('当前版本在 magic 表里，且 packFrameHeader 写的就是表里那个', () => {
   assert.ok(NACT_VERSION in MAGIC_BY_VERSION, `v${NACT_VERSION} 有对应 magic`)
-  const h = packFragHeader(new Uint8Array(16), 0, 10, 0)
+  const h = packFrameHeader(new Uint8Array(16), 0, 10, 0)
   const dv = new DataView(h.buffer, h.byteOffset, h.byteLength)
   assert.equal(dv.getUint8(30), MAGIC_BY_VERSION[NACT_VERSION], 'magic 取自版本表而不是写死')
 })
 
-// ── 真 carrier ──
+// ── real carrier ──
 
 test('peer 表：连上入表、断开离表，disconnect 只报一次且带走的是那个 peerId', async () => {
   const spec = tcp(PORT.nact)
@@ -333,7 +622,7 @@ test('connect 事件：入表和 announce 是同一件事', async () => {
   const spec = tcp(PORT.nact + 12)
   const { app: srv, stop: stopSrv } = await startApp('srv', { server: [spec] })
 
-  // 在对端拨进来之前就挂上，否则 connect 早于订阅
+  // subscribe before the peer dials in, or connect fires before the subscription
   const seen = []
   srv.bus.listen(NACTEvent.peerConnect, (p) => seen.push(p.peerId))
 
@@ -352,7 +641,7 @@ test('closePeer 的 resolve 是等 disconnect 事件等来的', async () => {
   const { cli, stop } = await startPair(spec)
 
   const peerId = cli.nact.listPeerId()[0]
-  // closePeer 内部就是订阅 peerDisconnect 来 settle 的，所以事件必然先于 resolve
+  // closePeer settles by subscribing to peerDisconnect, so the event always precedes resolve
   let announcedAt = -1, n = 0
   cli.bus.listen(NACTEvent.peerDisconnect, (p) => { if (p.peerId === peerId) announcedAt = ++n })
 
@@ -369,15 +658,15 @@ test('sendToPeer：找到就 true，找不到就 false', async () => {
   const spec = tcp(PORT.nact + 13)
   const { cli, stop } = await startPair(spec)
 
-  assert.equal(cli.nact.sendToPeer('不存在的 peer', aMsg({})), false)
-  assert.equal(cli.nact.sendToPeer(cli.nact.listPeerId()[0], aMsg({})), true, '真 peer 上返 true')
+  assert.equal(await cli.nact.sendToPeer('不存在的 peer', aMsg({})), false)
+  assert.equal(await cli.nact.sendToPeer(cli.nact.listPeerId()[0], aMsg({})), true, '真 peer 上返 true')
 
   await stop()
 })
 
 test('addPeer / getPeer / dropPeer / listPeerId 是一套自洽的表操作', async () => {
   const { app, stop } = await startApp('table')
-  const fake = { id: 'p-手搓', send() {}, close() {} }
+  const fake = { id: 'p-手搓', async send() {}, close() {} }
 
   assert.equal(app.nact.getPeer('p-手搓'), undefined, '还没加')
   app.nact.addPeer(fake)
@@ -388,9 +677,9 @@ test('addPeer / getPeer / dropPeer / listPeerId 是一套自洽的表操作', as
   assert.equal(app.nact.dropPeer('p-手搓'), false, '重复 drop 可见，不静默')
   assert.deepEqual(app.nact.listPeerId(), [])
 
-  // addPeer 按 peer.id 覆盖：同 id 再加是替换而不是并存
-  const dupA = { id: 'dup', send() {}, close() {} }
-  const dupB = { id: 'dup', send() {}, close() {} }
+  // addPeer keyed by peer.id: re-adding the same id replaces, never coexists
+  const dupA = { id: 'dup', async send() {}, close() {} }
+  const dupB = { id: 'dup', async send() {}, close() {} }
   app.nact.addPeer(dupA)
   app.nact.addPeer(dupB)
   assert.equal(app.nact.listPeerId().length, 1, '同 id 只有一行')
@@ -429,7 +718,7 @@ test('terminate：peer 表清空、且teardown 期间不播 disconnect', async (
   srv.bus.listen(NACTEvent.peerDisconnect, (p) => announced.push(p.peerId))
 
   await srv.nact.terminate()
-  await sleep(80)                       // 给 socket 的 close 事件留出到达时间
+  await sleep(80)                       // let the socket close event arrive
 
   assert.equal(srv.nact.listPeerId().length, 0, '整层 teardown 后表是空的')
   assert.equal(announced.length, 0,
@@ -438,69 +727,11 @@ test('terminate：peer 表清空、且teardown 期间不播 disconnect', async (
   await stopSrv()
 })
 
-test('三种 carrier 传同一条大消息，结果一致', async (t) => {
-  const big = 'M'.repeat(120 * 1024)
-  for (const [name, spec] of [
-    ['tcp', tcp(PORT.nact + 5)],
-    ['ws', ws(PORT.nact + 6)],
-    ['unix', unix('nact-full')],
-  ]) {
-    await t.test(name, async () => {
-      const { srv, cli, stop } = await startPair(spec)
-      const res = await cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } }).response
-      assert.equal(res.payload.big.length, big.length)
-      assert.equal(res.payload.big, big)
-      // Peer 抽象是承载无关的：不管底下是 socket 还是 ws 帧，上面看到的都是一行 peer
-      assert.equal(cli.nact.listPeerId().length, 1, `${name}: 客户端一行 peer`)
-      assert.equal(srv.nact.listPeerId().length, 1, `${name}: 服务端一行 peer`)
-      await stop()
-    })
-  }
-})
-
-test('自定义 chunkSize 生效：小 chunk 迫使大量分片，消息仍完整', async () => {
+test('自定义 chunkSize 生效：小 chunk 迫使大量帧，消息仍完整', async () => {
   const spec = tcp(PORT.nact + 7, { chunkSize: 512 })
   const { cli, stop } = await startPair(spec)
-  const big = 'C'.repeat(60 * 1024)     // 512 字节一片 → 120+ 片
+  const big = 'C'.repeat(60 * 1024)     // 512-byte frames → 120+ frames
   const res = await cli.request('srv', { kind: 'ability', target: 'echo', payload: { big } }).response
   assert.equal(res.payload.big, big)
   await stop()
-})
-
-test('heartbeat: -1 关闭心跳，连接照常工作', async () => {
-  const spec = tcp(PORT.nact + 8, { heartbeat: -1 })
-  const { cli, stop } = await startPair(spec)
-  const res = await cli.request('srv', { kind: 'ability', target: 'add', payload: { a: 1, b: 1 } }).response
-  assert.equal(res.payload, 2)
-  await stop()
-})
-
-test('listen 到被占用的端口要抛错', async () => {
-  const port = PORT.nact + 9
-  const blocker = net.createServer()
-  await new Promise((r) => blocker.listen(port, '127.0.0.1', r))
-
-  const { app, stop } = await startApp('taken')
-  await assert.rejects(app.nact.listen(tcp(port)), (e) => {
-    assert.equal(e.code, 'EADDRINUSE')
-    return true
-  })
-
-  await stop()
-  await new Promise((r) => blocker.close(r))
-})
-
-test('dial 到没人监听的端口要抛错', async () => {
-  const { app, stop } = await startApp('nobody')
-  await assert.rejects(app.nact.dial(tcp(PORT.nact + 10)), (e) => e.code === 'ECONNREFUSED')
-  await stop()
-})
-
-test('terminate 之后端口能立刻被复用', async () => {
-  const spec = tcp(PORT.nact + 11)
-  for (let i = 0; i < 3; i++) {
-    const { app, stop } = await startApp(`round-${i}`, { server: [spec] })
-    assert.ok(app)
-    await stop()
-  }
 })

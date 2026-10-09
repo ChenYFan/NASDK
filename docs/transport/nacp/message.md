@@ -208,5 +208,5 @@ import type {
   NACPMessage,
   RequestMessage,
   ResponseMessage,
-} from "@chenyfan/nasdk/NACP"
+} from "@nyirusu/nasdk/NACP"
 ```

@@ -1,8 +1,4 @@
-/**
- * full/nacab — 覆盖 NACAB 正常会走到的路径。
- *
- * simple/nacab 是用例，这里是覆盖：注册表语义、失败分类、观测面完整性、无泄漏、adaptor 契约。
- */
+// Coverage beyond simple/nacab: registry semantics, failure taxonomy, observability, leaks, adaptor contract.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -10,7 +6,7 @@ import { NACAB, AbilityHandler, NACABError } from '../../NACAB/index.ts'
 import { NASDKError } from '../../types.ts'
 import { collect } from '../_kit.mjs'
 
-// ── 注册 ──
+// ── register ──
 
 test('两种注册进同一张表，互相看得见', async () => {
   class Cls extends AbilityHandler {
@@ -53,7 +49,7 @@ test('能力名可以带点、冒号、中文 —— NACAB 不解释名字', asy
   }
 })
 
-// ── 输入输出 ──
+// ── input / output ──
 
 test('payload 原样进 execute，返回值原样出来', async () => {
   const nacab = new NACAB()
@@ -76,7 +72,7 @@ test('this 上的字段：id / input / status / state', async () => {
   class Look extends AbilityHandler {
     name = 'look'; description = 'x'
     async execute() {
-      this.state.touched = true       // state 引用冻结、内容可写
+      this.state.touched = true       // state object is frozen, contents writable
       return {
         id: typeof this.id, input: this.input,
         status: this.status, state: this.state,
@@ -100,7 +96,7 @@ test('每次 invoke 是独立实例，state 不串', async () => {
   assert.deepEqual(await Promise.all([1, 2, 3].map(() => nacab.invoke('c', {}))), [1, 1, 1])
 })
 
-// ── 失败 ──
+// ── failure ──
 
 test('未知能力：NACABError(inbound) + code', async () => {
   const nacab = new NACAB()
@@ -138,7 +134,7 @@ test('失败之后 NACAB 仍可用', async () => {
   assert.equal(await nacab.invoke('good', {}), 'ok')
 })
 
-// ── 观测面 ──
+// ── observability ──
 
 test('T 事件：六条齐全，layer 段是 ability', async () => {
   const nacab = new NACAB()
@@ -172,7 +168,7 @@ test('T 事件的 before/after 夹着状态写：before 看到旧值，after 看
 
   await nacab.invoke('ok', {})
   assert.deepEqual(seen, [
-    'running:before=pending',    // pending 是构造初值，没有自己的 T 事件，只在这里露一次脸
+    'running:before=pending',    // pending is the initial value, no T event of its own
     'running:after=running',
     'done:before=running',
     'done:after=done',
@@ -223,7 +219,7 @@ test('只读视图是每条 T 事件都包的，不止 done:after', async () => 
 
   const blocked = []
   nacab.eventBusObs.listen('nacab:ability:*:*:*', function (_p, k) {
-    // 换个字段试，证明拦的是所有写而不是单挑 status
+    // try a different field: all writes are blocked, not just status
     try { this.result = '篡改' } catch { blocked.push(k.split(':').slice(2, 4).join(':')) }
   })
   await nacab.invoke('ok', {})
@@ -336,7 +332,7 @@ test('eventBusObs 是只读的，没有 emit', () => {
   assert.equal(typeof nacab.eventBusObs.listen, 'function')
 })
 
-// ── 无泄漏 ──
+// ── no leaks ──
 
 test('1000 次调用后内部表不增长', async () => {
   const nacab = new NACAB()
@@ -403,7 +399,7 @@ test('adaptor.push 失败：whyNotOk 只报协议级，细节在 payload', async
     assert.ok(typeof out.r.error === 'string', '细节进 payload')
     detail[target] = out.r.error
   }
-  // errorDetail 取的是 message 而不是 String(err)，所以没有 "Error: " 前缀
+  // errorDetail uses message, not String(err), so no "Error: " prefix
   assert.equal(detail['bad'], '内部原因', 'handler 抛的 Error 取其 message')
   assert.match(detail['不存在'], /不存在/, '未知能力这条要说出是哪个名字没找到')
 })

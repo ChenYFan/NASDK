@@ -1,48 +1,28 @@
-/**
- * NACP state tables — seven standard tables. Each holds ONE Map (`sheet`) keyed the way its hot path reads
- * it; other-direction lookups scan (they run a handful of times per App lifetime).
- *
- *   PeerAppConnectionTable  — appId↔peerId link records + Gateway slot
- *   ResponsePendingTable    — outbound messages awaiting their response, keyed by message id
- *   SubscribeTable          — subscribed side: listen-id ownership roster (teardown off)
- *   ListenTable             — subscribing side: inbound notify → local handler
- *   OutboundBacklogTable    — outbound stage 1: held while the destination is offline
- *   AckPendingTable         — outbound stage 2: sent, waiting for ack
- *   InboundReceivedTable    — inbound dedup: ids already handled
- */
-
 import type { NACTPeerId } from '../NACT/types.ts'
 import type { NACPMessage, NotifyMessage, ResponseMessage } from './types.ts'
 import { nacpInbound } from './errors.ts'
 
-// ── PeerAppConnectionTable ──────────────────────────────────────────────────
-
-/** Reachability of one known App. `offline` = known + unreachable + on the grace clock. */
 export type AppLinkState = 'online' | 'offline'
 
-/** Link view at disconnect instant, kept for the decision at grace expiry. */
 export interface OfflineSnapshot {
-  peerId: NACTPeerId                  // the peer this appId was reached through
-  gatewayPeerId?: NACTPeerId          // the Gateway slot's holder at that instant
-  gatewayAppId?: string               // which appId held it — a Gateway's name is arbitrary, so identity is by appId, not by string match
+  peerId: NACTPeerId
+  gatewayPeerId?: NACTPeerId
+  gatewayAppId?: string               // identity is by appId, not string match
 }
 
 export interface AppLinkRecord {
   peerId: NACTPeerId
   state: AppLinkState
-  snapshot?: OfflineSnapshot          // present iff state === 'offline'
+  snapshot?: OfflineSnapshot
 }
 
 export class PeerAppConnectionTable {
   private appIdPeerSheet = new Map<string, AppLinkRecord>()
-  /** Outbound fallback peer; first-come-first-served via setGateway(). */
   private _gatewayPeerId?: NACTPeerId
-  /** Which appId holds the Gateway slot (several appIds may share the Gateway's peerId). */
   private _gatewayAppId?: string
 
   bind(appId: string, peerId: NACTPeerId) { this.appIdPeerSheet.set(appId, { peerId, state: 'online' }) }
 
-  /** Claim the Gateway slot; false when another peer holds it. */
   setGateway(peerId: NACTPeerId, appId: string): boolean {
     if (this._gatewayPeerId !== undefined && this._gatewayPeerId !== peerId) return false
     this._gatewayPeerId = peerId
@@ -52,7 +32,7 @@ export class PeerAppConnectionTable {
 
   hasGateway(): boolean { return this._gatewayPeerId !== undefined }
 
-  /** Mark unreachable + snapshot; undefined if unknown or already offline (first snapshot wins). */
+  /** Undefined if unknown or already offline — the first snapshot wins. */
   markOffline(appId: string): OfflineSnapshot | undefined {
     const rec = this.appIdPeerSheet.get(appId)
     if (!rec || rec.state === 'offline') return undefined
@@ -71,7 +51,6 @@ export class PeerAppConnectionTable {
     this.appIdPeerSheet.delete(appId)
   }
 
-  /** All appIds on one peer (a Gateway relay shares its peerId). */
   listAppIdbyPeerId(peerId: NACTPeerId): string[] {
     const out: string[] = []
     for (const [appId, rec] of this.appIdPeerSheet) if (rec.peerId === peerId) out.push(appId)
@@ -104,8 +83,8 @@ export class PeerAppConnectionTable {
 export interface PendingEntry {
   resolve: (r: ResponseMessage) => void
   reject: (e: Error) => void
-  timer: ReturnType<typeof setTimeout> | undefined   // undefined for request (no timeout)
-  destAppId: string                       // for bulk-fail when that peer goes away
+  timer: ReturnType<typeof setTimeout> | undefined   // undefined = no timeout (request)
+  destAppId: string
 }
 
 export class ResponsePendingTable {
@@ -113,18 +92,15 @@ export class ResponsePendingTable {
 
   add(msgId: string, entry: PendingEntry) { this.msgIdPendingSheet.set(msgId, entry) }
 
-  /** Peek without settling (notify is a push, not the terminal). */
   getPendingEntrybyMsgId(msgId: string): PendingEntry | undefined { return this.msgIdPendingSheet.get(msgId) }
 
-  /** Take the waiter and clear its timer; only the terminal response settles an entry. */
   settle(parentId: string): PendingEntry | undefined {
     const e = this.msgIdPendingSheet.get(parentId)
     if (e) { clearTimeout(e.timer); this.msgIdPendingSheet.delete(parentId) }
     return e
   }
 
-  /** Reject everything bound for one appId. Called only at full cleanup (grace expiry / goodbye), never on
-   *  bare disconnect — a returning peer replays its answers. */
+  /** Only at full cleanup (grace expiry / goodbye) — a returning peer replays its answers. */
   failFor(appId: string, reason: string) {
     for (const [id, e] of this.msgIdPendingSheet) {
       if (e.destAppId !== appId) continue
@@ -152,15 +128,14 @@ export class ResponsePendingTable {
 
 // ── SubscribeTable ──────────────────────────────────────────────────────────
 
-/** One active subscription = one listener this NACP registered on its own bus on a peer's behalf. */
+/** subId → record; read only at teardown (off its listenId). */
 export interface SubRecord {
-  subId: string           // the subscribe message's id (or the reqId, for an auto-subscription)
-  appId: string           // the subscriber — where matching notifies are sent
-  listenId: string        // the local EventBus subscription id, so unsubscribe/disconnect can `off` it
-  targetSubName: string   // the subscribed name (may contain a single-segment `*`); echoed in NotifyMeta
+  subId: string
+  appId: string
+  listenId: string
+  targetSubName: string
 }
 
-/** Listen-id ownership roster, read only at teardown (unsubscribe / peer vanished → off its listenId). */
 export class SubscribeTable {
   private subIdSubscribeSheet = new Map<string, SubRecord>()
 
@@ -189,17 +164,14 @@ export class SubscribeTable {
 
 // ── ListenTable ─────────────────────────────────────────────────────────────
 
-/** One active listen = one local handler for the notifies of a subscription THIS App requested. */
 export interface ListenRecord {
-  subId: string           // the same id the subscribed side files under
-  appId: string           // the peer we subscribed ON
-  targetSubName: string   // what we asked for (may contain a single-segment `*`)
-  targetListener: (payload: any, msg: NotifyMessage) => void   // always present; omitting means () => {}
-  /** Called once when this record leaves the table, whatever removed it. */
+  subId: string
+  appId: string
+  targetSubName: string
+  targetListener: (payload: any, msg: NotifyMessage) => void
   onEnd?: () => void
 }
 
-/** Subscribing side's half of a subscription: inbound notify → handler, matched by parentId. */
 export class ListenTable {
   private subIdListenSheet = new Map<string, ListenRecord>()
 
@@ -207,7 +179,7 @@ export class ListenTable {
 
   getListenRecordbySubId(subId: string): ListenRecord | undefined { return this.subIdListenSheet.get(subId) }
 
-  /** Fire a removed record's onEnd exactly once; every removal path funnels through here. */
+  /** All removal paths funnel through here so onEnd fires exactly once. */
   private end(rec: ListenRecord) {
     if (!rec.onEnd) return
     const fn = rec.onEnd
@@ -238,8 +210,6 @@ export class ListenTable {
 
 // ── the three ack-round-trip tables ─────────────────────────────────────────
 
-/** Approximate byte cost of a value for queue caps: Buffers exact, everything else estimated.
- *  Depth-limited against pathological payloads. */
 export function measureBytes(value: unknown, depth = 0): number {
   if (value === null || value === undefined) return 1
   if (depth > 8) return 64
@@ -264,16 +234,13 @@ export function measureBytes(value: unknown, depth = 0): number {
   }
 }
 
-/** One queued outbound message in either outbound table. */
 export interface OutboundRecord {
   msg: NACPMessage
   destAppId: string
-  bytes: number         // charge against the byte cap
-  sentOnce: boolean     // already reached the wire once, awaiting replay
+  bytes: number
+  sentOnce: boolean
 }
 
-/** Shared cap bookkeeping for the two outbound queues. Insertion order IS eviction order (Map iteration).
- *  A record larger than maxBytes still gets admitted as sole occupant. */
 abstract class CappedOutboundQueue {
   protected sheet = new Map<string, OutboundRecord>()
   protected _bytes = 0
@@ -295,6 +262,7 @@ abstract class CappedOutboundQueue {
 
   get(id: string): OutboundRecord | undefined { return this.sheet.get(id) }
   has(id: string): boolean { return this.sheet.has(id) }
+  delete(id: string): boolean { return this.take(id) !== undefined }
 
   listByAppId(appId: string): OutboundRecord[] {
     const out: OutboundRecord[] = []
@@ -327,21 +295,14 @@ export interface BacklogEviction {
   reason: 'notify-dropped' | 'notify-evicted' | 'fifo-evicted'
 }
 
-/**
- * Outbound stage 1: held while the destination is offline; pass-through while online. Keyed by message id,
- * grouped by DESTINATION appId (clearing rules are per-App).
- *
- * Overflow tiers: 1) arriving notify → drop the arrival; 2) evict oldest notifies; 3) plain FIFO.
- */
 export class OutboundBacklogTable extends CappedOutboundQueue {
-  /** Admit one message and settle the caps; returns what was given up. */
   add(rec: OutboundRecord): BacklogEviction[] {
     const arrivalIsNotify = rec.msg.type === 'notify'
     this.sheet.set(rec.msg.id, rec)
     this._bytes += rec.bytes
     if (!this.overCap) return []
 
-    // Tier 1
+    // Tier 1: drop the arriving notify.
     if (arrivalIsNotify) {
       this.take(rec.msg.id)
       return [{ rec, reason: 'notify-dropped' }]
@@ -375,8 +336,6 @@ export class OutboundBacklogTable extends CappedOutboundQueue {
 
 // ── AckPendingTable ─────────────────────────────────────────────────────────
 
-/** Outbound stage 2: sent, waiting for ack; keyed by message id (= ack's meta.parentId). Notify/ack never
- *  enter. No retry counter: timeout → App offline → replay on reconnect. */
 export class AckPendingTable extends CappedOutboundQueue {
   add(rec: OutboundRecord): OutboundRecord[] {
     this.sheet.set(rec.msg.id, rec)
@@ -404,15 +363,12 @@ export class AckPendingTable extends CappedOutboundQueue {
 
 // ── InboundReceivedTable ────────────────────────────────────────────────────
 
-/** Inbound dedup: ids already handled → handle once, ack every time. Without it a replayed response would
- *  falsely report has-no-consumer. Notify/ack get no record (never replayed). */
 export class InboundReceivedTable {
   private msgIdSeenSheet = new Map<string, string>()   // message id → source appId
   private maxCount: number
 
   constructor(maxCount: number) { this.maxCount = maxCount }
 
-  /** Record an id as handled, evicting oldest-first past the count cap. */
   add(msgId: string, fromAppId: string) {
     this.msgIdSeenSheet.set(msgId, fromAppId)
     for (const id of this.msgIdSeenSheet.keys()) {

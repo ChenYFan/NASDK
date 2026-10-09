@@ -5,7 +5,7 @@ EventBus 是 NASDK 的进程内事件总线，用于在模块之间发布和监�
 EventBus 不与 NApp 绑定，可以作为独立组件直接使用：
 
 ```js
-import { EventBus } from "@chenyfan/nasdk"
+import { EventBus } from "@nyirusu/nasdk"
 
 const bus = new EventBus()
 
@@ -62,7 +62,7 @@ NACEB、NACAB 等组件也有各自独立的 EventBus，不复用 `app.bus`。
 
 因此，如果你尝试订阅`nacp:outbound:notify:*`，很有可能会导致订阅到即将激活这个监听器的订阅内容，造成`消息自激`，最终形成`消息海啸`。
 
-截止`NASDK 1.0.3`，本特性是已知并且暂时标记为`刻意为之的`。
+截止`NASDK 1.0.4`，本特性是已知并且暂时标记为`刻意为之的`。
 :::
 
 ## 事件名

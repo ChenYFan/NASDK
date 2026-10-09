@@ -18,6 +18,8 @@ NApp.nacp.onAck(
 
 `message.meta.parentId` 指向被确认消息的 `id`。`onAck()` 使用该 ID 从 ACK 等待表中取出对应消息。
 
+如果 ACK 早于本端 Provider 的接纳 Promise 到达，也会正常确认正在提交的消息；随后到达的本地接纳结果不会重复建立 ACK 等待。
+
 找不到记录时，会报告 `has-no-consumer` 并结束处理。常见原因是重复 ACK，或对应消息已经被放弃。
 
 ### 结算等待方

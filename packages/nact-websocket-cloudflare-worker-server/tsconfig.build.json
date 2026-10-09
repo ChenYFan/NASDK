@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.provider-build.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": ".",
+    "lib": ["ES2022"],
+    "types": ["node", "@cloudflare/workers-types"]
+  },
+  "include": ["index.ts"]
+}

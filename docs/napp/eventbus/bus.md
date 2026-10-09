@@ -3,7 +3,7 @@
 EventBus 可以独立创建，也可以通过 NApp 的 `app.bus` 使用。
 
 ```js
-import { EventBus } from "@chenyfan/nasdk"
+import { EventBus } from "@nyirusu/nasdk"
 
 const bus = new EventBus()
 ```
@@ -111,7 +111,7 @@ observer.off(listenerId)
 `readonlyView()` 为传给 Listener 的 `thisArg` 提供浅层只读代理。
 
 ```js
-import { readonlyView } from "@chenyfan/nasdk/EventBus"
+import { readonlyView } from "@nyirusu/nasdk/EventBus"
 
 bus.emit("task:done", payload, readonlyView(task))
 ```

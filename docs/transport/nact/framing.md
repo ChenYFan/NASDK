@@ -1,8 +1,10 @@
 # NACT Framing
 
-无论是否分片，NACT 都会为每段字节增加 32 Bytes Header。
+NACT 会把一个 NACP 包分片成一个或多个 NACT 帧。
 
-## NACT 消息头
+无论是否需要分片，每一帧NACT都会额外添加长度为 32 Bytes 的帧头。
+
+## NACT 帧头
 
 <div style="overflow-x: auto">
 <table style="display: table; overflow: visible; min-width: 960px; table-layout: fixed; text-align: center">
@@ -33,55 +35,60 @@
 </table>
 </div>
 
-Frame Body 紧跟在 32B Header 后，从 `0x20` 开始，长度为 `thisFrameSize - 32`。
+帧体紧跟在 32B 帧头后，从 `0x20` 开始，长度为 `thisFrameSize - 32`。
 
 | Offset | 长度 | 字段            | 编码       | v1 值    | 含义                                                           |
 | ------ | ---- | --------------- | ---------- | -------- | -------------------------------------------------------------- |
-| 0      | 16   | `msgId`         | 16 bytes   | -        | 同一**NACP**消息所有片相同                                     |
-| 16     | 4    | `offset`        | uint32, BE | —        | 本片在整条消息中的起始字节                                     |
-| 20     | 4    | `totalSize`     | uint32, BE | —        | 整条消息长度                                                   |
-| 24     | 4    | `thisFrameSize` | uint32, BE | —        | **本片总长，含这 32B 头**，故 `bodyLen = thisFrameSize - 32`。 |
+| 0      | 16   | `msgId`         | 16 bytes   | -        | 同一 **NACP 包**的所有帧相同                                  |
+| 16     | 4    | `offset`        | uint32, BE | —        | 本帧在所属 NACP 包中的起始字节                                 |
+| 20     | 4    | `totalSize`     | uint32, BE | —        | 所属 NACP 包的总长度                                           |
+| 24     | 4    | `thisFrameSize` | uint32, BE | —        | **本帧总长，含这 32B 帧头**，故 `bodyLen = thisFrameSize - 32`。 |
 | 28     | 2    | `blank`         | uint16, BE | `0x0000` | 预留给未来的指示位                                             |
 | 30     | 1    | `magic`         | uint8      | `0xCF`   | 魔数                                                           |
 | 31     | 1    | `version`       | uint8      | `0x01`   | NACT Message版本                                               |
 
-错误的版本会出现 `version-mismatch` 错误，版本正确但 magic 不匹配会出现 `bad-magic` 错误。
 
-出错后都强制断连，没有向未来兼容解析。
 
 :::danger
 
-由于totalSize只包含4Bytes，因此最大的长度只有2^(4\*8)-1 Bytes，即约4GB。换句话说NACT理论上最大能承载一个4GB的消息发送。
+
+**feat: NACT对单帧和单包的大小限制分别为2GB和4GB**
+
+由于`totalSize`长度仅4Bytes，因此最大的长度只有2^(4\*8)-1 Bytes，即约4GB。
 
 这个数字其实是原先Node20对Buffer的最大限制，尽管在Node24中上限被提高到了8PB。
 
-不过，实际传输中这个限制被NACP进一步调低，默认是2GB。
+此外 `thisFrameSize` 超过 `MAX_FRAME_SIZE`（默认 2 GiB）则会出现 `frame-too-large`错误。
 
-**（NASDK v1.0.3，NACT v1）** 未来可能会通过增加头部长度、缩短msgID或利用Blank字段提升长度限制。~~但是至少最近一段时间不会考虑修改NACT~~
+本特性在 **（NASDK v1.0.4，NACT v1）** 仍存在。未来可能会通过增加头部长度、缩短msgID或利用Blank字段提升长度限制。~~但是至少最近一段时间不会考虑修改NACT~~
 
 :::
 
-## 分片与重组
+## 分帧与重组
 
-NACT 内有分片机制，对于一个较大的Payload消息，NACT会切分为多个帧按序发送。
+NACP 包超过分片阈值时，NACT 会把它分片成多个帧依次发送。
 
-tcp / ws 承载链路默认按照 100MB 分片，同机 unix 默认不分片。
+分片阈值来自 `TransportSpec.nact.chunkSize`，省略时使用当前 Provider 声明的推荐默认值。
 
-NACT 分片是设计是为穿透 TCP / WebSocket 的中间层（如 CDN 的单帧上限），同时进一步降低了内存占用。
+分片的目的是为了穿透物理传输中间层的单次提交上限（如部分CDN限制100MB上传之类的），同时进一步降低发送端合并产生的内存峰值。
+
+:::tip
+NACP默认分片大小是100MB，但UnixSocket默认不分片。
+:::
 
 :::details
 1GB payload 实测：
 
-| 承载 | 分片       | wire (ms) | 接收端内存峰值 |
+| provider | 分帧       | wire (ms) | 接收端内存峰值 |
 | ---- | ---------- | --------- | -------------- |
-| unix | 不分片     | 665       | 1024 MB        |
+| unix | 一帧       | 665       | 1024 MB        |
 | unix | 100MB × 11 | 668       | 1024 MB        |
-| tcp  | 不分片     | 734       | 1024 MB        |
+| tcp  | 一帧       | 734       | 1024 MB        |
 | tcp  | 100MB × 11 | 667       | 1024 MB        |
-| ws   | 不分片     | 2784      | 3027 MB        |
+| ws   | 一帧       | 2784      | 3027 MB        |
 | ws   | 100MB × 11 | 3931      | **1147 MB**    |
 
 Q：这里为什么会x11
 
-A：因为NACT保证的是**添加头之后产出的包最大是100MB**，所以每次只会截取`100MB-32B`的数据，最后还有`32B+320B`数据需要单独发送。
+A：因为这一组测试把 `chunkSize` 设为 100MB，NACT 保证**加上帧头后每一帧不超过 100MB**，所以每帧只装 `100MB-32B` 的数据，余下的 `320B` 单独成一帧（`32B` 帧头 + `320B`）。
 :::

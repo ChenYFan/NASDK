@@ -36,8 +36,8 @@ interface PipelineStep {
 ## 定义 Handler
 
 ```ts
-import { PipelineHandler } from '@chenyfan/nasdk/NACEB'
-import type { PipelineInstance } from '@chenyfan/nasdk/NACEB'
+import { PipelineHandler } from '@nyirusu/nasdk/NACEB'
+import type { PipelineInstance } from '@nyirusu/nasdk/NACEB'
 
 class GreetingPipeline extends PipelineHandler { // [!code focus:17]
   readonly name = 'greeting'

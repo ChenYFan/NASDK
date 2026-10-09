@@ -3,7 +3,7 @@
 Veto是NACEB取消当前状态转移的控制机制，仅能在特定的before THook中使用。
 
 ```ts
-import { VetoT } from '@chenyfan/nasdk/NACEB'
+import { VetoT } from '@nyirusu/nasdk/NACEB'
 
 event.beforeTActivating(function () {
   if (!ready()) throw new VetoT('not ready')

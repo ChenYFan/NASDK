@@ -1,10 +1,3 @@
-/**
- * simple/nacab — 能力处理机：注册一个函数、调用它、看观测事件。
- *
- * 不走网络。NACAB 是「一次调用、无状态、瞬时」的那一半（另一半是 NACEB）。
- * 没有 pipeline、没有 tick、没有 hook、没有 busyKey、没有过程流 —— 本质就是一个 Map 加一套观测。
- */
-
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { NACAB, AbilityHandler } from '../../NACAB/index.ts'
@@ -22,7 +15,6 @@ test('registerHandler：类式注册，execute 里能用 this', async () => {
     name = 'echo'
     description = '回显输入'
     async execute() {
-      // this 是 AbilityInstance：input / id / status / state 都在
       return { got: this.input, status: this.status, hasId: typeof this.id === 'string' }
     }
   }
@@ -85,14 +77,14 @@ test('T 事件：nacab:ability:{态}:{前后}:{id}', async () => {
   for (const state of ['running', 'done', 'failure']) {
     for (const phase of ['before', 'after']) {
       nacab.eventBusObs.listen(`nacab:ability:${state}:${phase}:*`, function () {
-        seen.push(`${state}:${phase}=${this.status}`)   // this 是 AbilityInstance 只读视图
+            seen.push(`${state}:${phase}=${this.status}`)   // this is a readonly AbilityInstance view
       })
     }
   }
 
   await nacab.invoke('ok', {})
 
-  // before 在写 status 之前发，after 在之后发
+  // before fires before status is written, after fires after
   assert.deepEqual(seen, [
     'running:before=pending', 'running:after=running',
     'done:before=running', 'done:after=done',
@@ -128,7 +120,7 @@ test('并发调用互不影响', async () => {
     execute: async (p) => { await new Promise((r) => setTimeout(r, 10 - p.n)); return p.n },
   })
 
-  // 没有 tick、没有队列、没有 busyKey —— 三个一起跑，各自返回
+  // no tick, queue, or busyKey: all three run concurrently
   assert.deepEqual(
     await Promise.all([1, 2, 3].map((n) => nacab.invoke('slow', { n }))),
     [1, 2, 3],

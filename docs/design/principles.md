@@ -18,7 +18,7 @@ NApp 使用稳定的 App ID 相互寻址，而不是直接依赖某条 WebSocket
 
 ## 协议独立于传输
 
-NACP 定义 Request、Response、Subscribe、Notify、Signal 和 Ack 等应用语义，NACT 负责消息编码、分片重组以及具体传输承载。
+NACP 定义 Request、Response、Subscribe、Notify、Signal 和 Ack 等应用语义，NACT 负责消息编码、分帧与重组以及具体传输承载。
 
 两者保持分离，协议不关心消息经由 TCP、WebSocket 还是 Unix Socket 发送，传输层也不解释消息的业务含义。
 

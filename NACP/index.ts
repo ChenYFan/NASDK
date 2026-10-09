@@ -1,8 +1,3 @@
-/**
- * NACP public API barrel: the protocol face, message envelope/meta/payload types, buildMessage, event-name
- * builders, and the layer error. State tables are NACP-internal and not re-exported.
- */
-
 export { NACP } from './NACP.ts'
 
 export { buildMessage, PROTOCOL_V } from './types.ts'
