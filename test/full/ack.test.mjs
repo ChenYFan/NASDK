@@ -94,6 +94,27 @@ test('ACK 自身不被 ACK，未知 ACK 只进入错误通道', async () => {
   await terminateSilent(app)
 })
 
+test('ACK 驱逐旧队首后，新记录不会继承旧截止时间，迟到 ACK 可跳过', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { app, peer, sent } = await bound('me', { queueMaxCount: 1, ackTimeoutMs: 100 })
+  t.after(() => terminateSilent(app))
+  const first = app.response('them', { parentId: 'first', isOk: true })
+  await Promise.resolve(); await Promise.resolve()
+  const old = sent.find(m => m.type === 'response')
+  t.mock.timers.tick(60)
+  const second = app.response('them', { parentId: 'second', isOk: true })
+  await Promise.resolve(); await Promise.resolve()
+  assert.equal(await first, false)
+  app.nacp.inbound(msg('ack', { from: 'them', to: 'me', meta: { parentId: old.id } }), peer)
+  t.mock.timers.tick(41)
+  assert.deepEqual(app.listConnectedApp(), ['them'], '旧队首截止不应判新消息超时')
+  const current = sent.filter(m => m.type === 'response').at(-1)
+  app.nacp.inbound(msg('ack', { from: 'them', to: 'me', meta: { parentId: current.id } }), peer)
+  assert.equal(await second, true)
+  t.mock.timers.tick(100)
+  assert.deepEqual(app.listConnectedApp(), ['them'])
+})
+
 test('ACK 超时进入 offline；重连先完成握手，再按原顺序续发 backlog', async () => {
   const { app, sent } = await bound('me', { ackTimeoutMs: 20, reconnectGraceMs: 500 })
   const responseDone = app.response('them', { parentId: 'request-1', isOk: true })

@@ -18,9 +18,12 @@ import WebSocketClientProvider from '../packages/nact-websocket-client/index.ts'
 import assert from 'node:assert/strict'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fork } from 'node:child_process'
+import { createHistogram, monitorEventLoopDelay, performance } from 'node:perf_hooks'
 import { setImmediate as flush } from 'node:timers/promises'
 import { packFrameHeader } from '../NACT/framing.ts'
 import HTTPClient from '../packages/nact-streamable-http-client/index.ts'
+import HTTPServer from '../packages/nact-streamable-http-server/index.ts'
 import { NACT_PREFACE } from '../packages/nact-provider-shared/index.ts'
 
 // ── addresses ──────────────────────────────────────────────────────────────────────────────────────────
@@ -580,6 +583,13 @@ export async function runTestPeer(mode, cfg) {
     try {
       switch (m.cmd) {
         case 'emit': app.bus.emit(m.key, m.payload); if (mode !== 'simple') reply(m.id, { ok: true }); return
+        case 'emitBatch': {
+          for (let i = 0; i < m.count; i++) {
+            app.bus.emit(m.key, { i, data: new Uint8Array(m.size ?? 0) })
+            if (i % 32 === 31) await flush()
+          }
+          return reply(m.id, { ok: true })
+        }
         case 'peers': return reply(m.id, { peers: app.listConnectedApp() })
         case 'decl': return reply(m.id, { decl: app.buildDecl() })
         case 'subcount': return reply(m.id, { subs: app.nacp.getSubCount(), listens: app.nacp.getListenCount() })
@@ -597,3 +607,327 @@ export async function runTestPeer(mode, cfg) {
 }
 
 if (process.argv[2] === '--test-peer') await runTestPeer(process.argv[3], JSON.parse(process.argv[4]))
+
+export function benchMeter({ noDelay = false } = {}) {
+  const delay = monitorEventLoopDelay({ resolution: 10 })
+  let cpu, clock, elu, timer, lastSample, lastPublish = 0
+  const meter = { txBytes: 0, rxBytes: 0, txFrames: 0, rxFrames: 0, writePeakBytes: 0,
+    rssPeakBytes: 0, arrayBuffersPeakBytes: 0, heapPeakBytes: 0, warnings: {} }
+  const channels = new Set()
+  const sample = () => {
+    const memory = process.memoryUsage()
+    meter.rssPeakBytes = Math.max(meter.rssPeakBytes, memory.rss)
+    meter.arrayBuffersPeakBytes = Math.max(meter.arrayBuffersPeakBytes, memory.arrayBuffers)
+    meter.heapPeakBytes = Math.max(meter.heapPeakBytes, memory.heapUsed)
+    if (clock !== undefined && performance.now() - lastSample >= 1000) {
+      lastSample = performance.now()
+      meter.samples.push({ seconds: (lastSample - clock) / 1000, rssBytes: memory.rss,
+        arrayBuffersBytes: memory.arrayBuffers, heapBytes: memory.heapUsed, txBytes: meter.txBytes, rxBytes: meter.rxBytes })
+    }
+    let queued = 0
+    for (const channel of channels) queued += channel.socket?.writableLength ?? channel.socket?.bufferedAmount ?? 0
+    meter.writePeakBytes = Math.max(meter.writePeakBytes, queued)
+    if (process.env.NASDK_METRICS_URL && clock !== undefined && performance.now() - lastPublish >= 1000) {
+      lastPublish = performance.now()
+      void fetch(`${process.env.NASDK_METRICS_URL}/ingest`, { method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ labels: meter.labels ?? { role: process.argv[2] === '--bench-peer' ? 'server' : 'client' },
+          values: { rss_bytes: memory.rss, array_buffers_bytes: memory.arrayBuffers, write_queue_bytes: queued,
+            tx_bytes_total: meter.txBytes, rx_bytes_total: meter.rxBytes,
+            heap_bytes: memory.heapUsed, cpu_percent: (() => { const c = process.cpuUsage(cpu); return (c.user + c.system) / ((performance.now() - clock) * 10) })(),
+            event_loop_utilization: performance.eventLoopUtilization(elu).utilization } }),
+        signal: AbortSignal.timeout(1000) }).catch(() => {})
+    }
+  }
+  meter.instrument = app => {
+    for (const name of ['ackWarning', 'ackError', 'backlogWarning', 'routeError', 'notifyError']) {
+      app.bus.listen(`nacp:internal:${name.replace(/([A-Z])/g, ':$1').toLowerCase()}`, payload => {
+        meter.warnings[name] = (meter.warnings[name] ?? 0) + 1
+        const reason = `${name}:${payload.reason ?? 'unknown'}`
+        meter.warnings[reason] = (meter.warnings[reason] ?? 0) + 1
+      })
+    }
+    for (const Provider of [TCPServerProvider, TCPClientProvider, UnixServerProvider, UnixClientProvider,
+      WebSocketServerProvider, WebSocketClientProvider, HTTPServer, HTTPClient]) {
+      const provider = new Provider()
+      const wrap = channel => {
+        channel.onError(error => {
+          const key = `transportError:${error?.code ?? error?.message ?? String(error)}`
+          meter.warnings[key] = (meter.warnings[key] ?? 0) + 1
+        })
+        if (noDelay) channel.socket?.setNoDelay?.(true)
+        channels.add(channel)
+        channel.onClose(() => channels.delete(channel))
+        const send = channel.send.bind(channel), receive = channel.onReceive.bind(channel)
+        channel.send = frame => {
+          meter.txFrames++
+          meter.txBytes += frame.reduce((n, bytes) => n + bytes.byteLength, 0)
+          const result = send(frame)
+          meter.writePeakBytes = Math.max(meter.writePeakBytes,
+            channel.socket?.writableLength ?? channel.socket?.bufferedAmount ?? 0)
+          return result
+        }
+        channel.onReceive = handler => receive(frame => {
+          meter.rxFrames++
+          meter.rxBytes += frame.reduce((n, bytes) => n + bytes.byteLength, 0)
+          handler(frame)
+        })
+        return channel
+      }
+      if (provider.role === 'client') {
+        const dial = provider.dial.bind(provider)
+        provider.dial = async opt => wrap(await dial(opt))
+      } else {
+        const listen = provider.listen.bind(provider)
+        provider.listen = (opt, accept) => listen(opt, channel => accept(wrap(channel)))
+      }
+      app.nact.use(provider)
+    }
+    return app
+  }
+  meter.start = () => {
+    for (const key of ['txBytes', 'rxBytes', 'txFrames', 'rxFrames', 'writePeakBytes', 'rssPeakBytes', 'arrayBuffersPeakBytes', 'heapPeakBytes']) meter[key] = 0
+    meter.warnings = {}
+    meter.rssStartBytes = process.memoryUsage().rss
+    meter.arrayBuffersStartBytes = process.memoryUsage().arrayBuffers
+    cpu = process.cpuUsage(); clock = performance.now(); elu = performance.eventLoopUtilization()
+    lastSample = clock; meter.samples = []
+    delay.reset(); delay.enable(); sample()
+    timer = setInterval(sample, 100)
+  }
+  meter.stop = () => {
+    clearInterval(timer); sample(); delay.disable()
+    const used = process.cpuUsage(cpu), elapsedMs = performance.now() - clock
+    return { ...Object.fromEntries(Object.entries(meter).filter(([, value]) => typeof value !== 'function')),
+      rssEndBytes: process.memoryUsage().rss, heapEndBytes: process.memoryUsage().heapUsed,
+      arrayBuffersEndBytes: process.memoryUsage().arrayBuffers,
+      cpuPercent: (used.user + used.system) / (elapsedMs * 10),
+      eventLoopUtilization: performance.eventLoopUtilization(elu).utilization,
+      eventLoopP99Ms: delay.percentile(99) / 1e6 }
+  }
+  return meter
+}
+
+export async function benchPeer(t, spec, noDelay = false, topology = {}) {
+  const child = fork(new URL('./_kit.mjs', import.meta.url), ['--bench-peer', JSON.stringify(spec), String(noDelay), JSON.stringify(topology)], {
+    stdio: ['ignore', 'inherit', 'inherit', 'ipc'],
+  })
+  t.after(async () => {
+    if (child.exitCode !== null) return
+    await new Promise(resolve => {
+      const timer = setTimeout(() => child.kill('SIGKILL'), 2000)
+      child.once('exit', () => { clearTimeout(timer); resolve() })
+      child.send({ cmd: 'bye' })
+    })
+  })
+  await new Promise((resolve, reject) => {
+    child.once('message', resolve); child.once('error', reject)
+    child.once('exit', code => reject(new Error(`benchmark peer exited: ${code}`)))
+  })
+  let seq = 0
+  return { child, ask: (cmd, extra = {}) => new Promise((resolve, reject) => {
+    const id = ++seq
+    const cleanup = () => { child.off('message', receive); child.off('exit', exit); clearTimeout(timer) }
+    const receive = message => {
+      if (message.id !== id) return
+      cleanup()
+      if (message.error) reject(new Error(message.error))
+      else resolve(message)
+    }
+    const exit = code => { cleanup(); reject(new Error(`benchmark peer exited: ${code}`)) }
+    const timer = setTimeout(() => { cleanup(); reject(new Error(`benchmark IPC timeout: ${cmd}`)) }, 30000)
+    child.on('message', receive); child.once('exit', exit); child.send({ cmd, id, ...extra })
+  }) }
+}
+
+export function benchSteps(value) {
+  if (value === undefined || value.trim() === '') return undefined
+  const steps = value.split(',').map(Number)
+  if (steps.some(step => !Number.isSafeInteger(step) || step < 1)) throw new Error('Invalid VU steps')
+  return steps
+}
+
+export async function benchGatewayUsers(t, spec, users, links, meter) {
+  const apps = []
+  t.after(async () => {
+    for (const app of apps) app.nacp.terminate()
+    await Promise.all(apps.map(app => app.nact.terminate()))
+  })
+  for (let i = 0; i < users; i++) {
+    const app = meter.instrument(new NApp({ id: `bench-user-${i}`, opt: { heartbeatIntervalMs: false,
+      ackTimeoutMs: 10000, reconnectGraceMs: 100, queueMaxCount: Number(process.env.NASDK_CAPACITY_QUEUE_MAX_COUNT || 1024) } }))
+    apps.push(app); await app.start()
+    for (let link = 0; link < links; link++) await app.connect(`bench-gateway-${link}`, spec)
+    if ((i + 1) % 256 === 0) console.log(`USERS connected ${i + 1}/${users}`)
+  }
+  return apps
+}
+
+export function benchLoadConfig(connections, cfg) {
+  const vus = cfg.vus ?? connections
+  const vuInflight = cfg.vuInflight ?? (cfg.vus === undefined ? cfg.inflight ?? 1 : 1)
+  for (const value of [connections, vus, vuInflight]) assert.ok(Number.isSafeInteger(value) && value > 0, 'invalid load dimensions')
+  const totalInflight = vus * vuInflight
+  assert.ok(Number.isSafeInteger(totalInflight), 'in-flight limit exceeds safe integer range')
+  return { vus, vuInflight, totalInflight, connections, usedConnections: Math.min(vus, connections),
+    maxInflightPerConnection: Math.ceil(vus / connections) * vuInflight }
+}
+
+export async function benchRequests(apps, cfg, seconds) {
+  const load = benchLoadConfig(apps.length, cfg)
+  if (cfg.topology === 'gateway-mux') Object.assign(load, { connections: apps.length * cfg.userLinks,
+    usedConnections: apps.length, upstreamConnections: 1, users: apps.length })
+  const histogram = createHistogram()
+  const data = Uint8Array.from({ length: cfg.size }, (_, i) => i & 255)
+  const errors = {}, started = performance.now(), deadline = started + seconds * 1000
+  let seq = 0, completed = 0, failed = 0, stop = false, missed = 0, active = 0
+  const bounds = [0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1, 5, 15]
+  const buckets = bounds.map(() => 0)
+  let sum = 0
+  const publish = () => {
+    if (!process.env.NASDK_METRICS_URL) return
+    void fetch(`${process.env.NASDK_METRICS_URL}/ingest`, { method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ labels: { role: 'load', provider: cfg.provider, mode: cfg.mode,
+        size: cfg.size, ...load, ...(process.env.NASDK_BENCH_RUN && { run: process.env.NASDK_BENCH_RUN }),
+        ...(process.env.NASDK_BENCH_SHA && { git: process.env.NASDK_BENCH_SHA }),
+        model: cfg.rate ? 'arrival' : 'closed', stage: cfg.stage ?? 'measurement' },
+        values: { completed_total: completed, failed_total: failed, missed_total: missed,
+          useful_bytes_total: completed * cfg.size * (cfg.mode === 'echo' ? 2 : 1), target_rate: cfg.rate ?? 0,
+          configured_vus: load.vus, configured_connections: load.connections, active_requests: active,
+          inflight_limit: load.totalInflight },
+        histogram: { bounds, buckets, count: completed, sum } }), signal: AbortSignal.timeout(1000) }).catch(() => {})
+  }
+  const metricTimer = setInterval(publish, 1000)
+  const request = async app => {
+    const id = seq++, begin = performance.now()
+    try {
+      const response = await app.request('bench-server', {
+        kind: 'ability', target: `bench.${cfg.mode}`, payload: { seq: id, data },
+      }).response
+      if (cfg.topology === 'gateway-mux') {
+        assert.equal(response.to, app.id)
+        assert.equal(response.from, 'bench-server')
+      }
+      assert.equal(response.payload.seq, id)
+      assert.equal(response.payload.length, data.length)
+      if (cfg.mode === 'echo') {
+        const bytes = response.payload.data
+        assert.ok(Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).equals(data), 'echo binary mismatch')
+      }
+      histogram.record(Math.max(1, Math.round((performance.now() - begin) * 1e6)))
+      const seconds = (performance.now() - begin) / 1000
+      sum += seconds
+      for (let i = 0; i < bounds.length; i++) if (seconds <= bounds[i]) buckets[i]++
+      completed++
+    } catch (error) {
+      failed++
+      const code = error.code ?? error.message
+      errors[code] = (errors[code] ?? 0) + 1
+    }
+  }
+  // A deadline aborts the whole phase; timed-out calls are never replaced with fresh calls.
+  const abort = setTimeout(() => {
+    stop = true
+    for (const app of apps) { app.nacp.terminate(); void app.nact.terminate() }
+  }, seconds * 1000 + 15000)
+  try {
+    if (cfg.rate) {
+      const pending = new Set(), perVuActive = Array(load.vus).fill(0)
+      let slot = 0
+      while (!stop && performance.now() < deadline) {
+        const due = Math.min(Math.floor((performance.now() - started) * cfg.rate / 1000), Math.ceil(seconds * cfg.rate) - 1)
+        while (slot <= due && !stop) {
+          const index = slot++
+          const vu = index % load.vus
+          if (perVuActive[vu] >= load.vuInflight) { missed++; continue }
+          active++
+          perVuActive[vu]++
+          const work = request(apps[vu % apps.length]).finally(() => { active--; perVuActive[vu]--; pending.delete(work) })
+          pending.add(work)
+        }
+        // Small caps must not be artificially limited to one batch per millisecond.
+        if (cfg.provider === 'nacp-direct') await flush()
+        else await sleep(1)
+      }
+      missed += Math.max(0, Math.ceil(seconds * cfg.rate) - slot)
+      await Promise.all(pending)
+    } else {
+      await Promise.all(Array.from({ length: load.vus }, (_, vu) =>
+        Array.from({ length: load.vuInflight }, async () => {
+        let count = 0
+        while (!stop && performance.now() < deadline) {
+          active++
+          try { await request(apps[vu % apps.length]) } finally { active-- }
+          if (++count % 32 === 0) await flush()
+        }
+      })).flat())
+    }
+  } finally { clearTimeout(abort); clearInterval(metricTimer); publish() }
+  const elapsedMs = performance.now() - started
+  return { ...load, attempted: seq, completed, failed, missed, aborted: stop, errors, elapsedMs,
+    msgPerSec: completed / (elapsedMs / 1000),
+    usefulMiBPerSec: completed * cfg.size * (cfg.mode === 'echo' ? 2 : 1) / (1024 ** 2 * elapsedMs / 1000),
+    latencyMs: { p50: histogram.percentile(50) / 1e6, p95: histogram.percentile(95) / 1e6,
+      p99: histogram.percentile(99) / 1e6, max: histogram.max / 1e6 },
+  }
+}
+
+export async function benchNacpPair(t) {
+  const server = new NApp({ id: 'bench-server', opt: { heartbeatIntervalMs: false } })
+  const client = new NApp({ id: 'bench-client', opt: { heartbeatIntervalMs: false } })
+  const nacab = new NACAB()
+  for (const mode of ['sink', 'echo']) nacab.register({ name: `bench.${mode}`, description: mode,
+    execute: p => ({ seq: p.seq, length: p.data.byteLength, ...(mode === 'echo' && { data: p.data }) }) })
+  server.bindProcessor('ability', nacab.nacpAdaptor)
+  await server.start(); await client.start()
+  // Direct messages exercise NACP registration, ACK and response without framing/codec/IO.
+  const intoServer = { id: 'nacp-server-peer', send: async msg => { queueMicrotask(() => server.nacp.inbound(msg, intoClient)) }, close() {} }
+  const intoClient = { id: 'nacp-client-peer', send: async msg => { queueMicrotask(() => client.nacp.inbound(msg, intoServer)) }, close() {} }
+  server.nact.addPeer(intoClient); client.nact.addPeer(intoServer)
+  server.nact.sendToPeer = async (_id, msg) => { await intoClient.send(msg); return true }
+  client.nact.sendToPeer = async (_id, msg) => { await intoServer.send(msg); return true }
+  client.nact.dial = async () => intoServer
+  await client.connect('bench-server', { type: 'nacp-direct', provider: {} })
+  t.after(async () => { await client.terminate(); await server.terminate() })
+  return [client]
+}
+
+if (process.argv[2] === '--bench-peer') {
+  const topology = JSON.parse(process.argv[5] ?? '{}')
+  const meter = benchMeter({ noDelay: process.argv[4] === 'true' })
+  meter.labels = { role: topology.gateway ? 'gateway' : 'server', provider: JSON.parse(process.argv[3]).type,
+    ...(process.env.NASDK_BENCH_RUN && { run: process.env.NASDK_BENCH_RUN }),
+    ...(topology.gateway || topology.upstream ? { topology: 'gateway-mux' } : {}) }
+  const spec = JSON.parse(process.argv[3])
+  const app = meter.instrument(new NApp({ id: topology.gateway ? 'bench-gateway-0' : 'bench-server',
+    server: topology.upstream ? [] : [spec],
+    opt: { heartbeatIntervalMs: false, ackTimeoutMs: 10000, reconnectGraceMs: 100,
+      isGateway: Boolean(topology.gateway), queueMaxCount: Number(process.env.NASDK_CAPACITY_QUEUE_MAX_COUNT || 1024) } }))
+  const nacab = new NACAB()
+  nacab.register({ name: 'bench.sink', description: 'confirm received bytes',
+    execute: p => ({ seq: p.seq, length: p.data.byteLength }) })
+  nacab.register({ name: 'bench.echo', description: 'return received bytes',
+    execute: p => ({ seq: p.seq, length: p.data.byteLength, data: p.data }) })
+  app.bindProcessor('ability', nacab.nacpAdaptor)
+  await app.start()
+  if (topology.upstream) await app.connect('bench-gateway-0', spec)
+  process.on('message', async m => {
+    try {
+      if (m.cmd === 'bye') { await app.terminate(); process.exit(0) }
+      let result = {}
+      if (m.cmd === 'peers') result = { peers: app.nact.listPeerId().length }
+      if (m.cmd === 'start') { meter.labels = { ...meter.labels, ...m.labels }; meter.start() }
+      if (m.cmd === 'stop') result = { metrics: meter.stop(), peers: app.nact.listPeerId().length }
+      if (m.cmd === 'notify') {
+        const data = new Uint8Array(m.size)
+        for (let i = 0; i < m.count; i++) {
+          app.bus.emit('bench:notify', { i, data })
+          if (i % 32 === 31) await flush()
+        }
+      }
+      process.send({ id: m.id, ...result })
+    } catch (e) { process.send({ id: m.id, error: e.message }) }
+  })
+  process.send({ ready: true })
+}

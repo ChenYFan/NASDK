@@ -132,8 +132,10 @@ test('2000 条 notify 全程消费，不丢不乱', async () => {
     for await (const message of stream) { got.push(message.payload.i); if (got.length === N) break }
   })()
 
-  const [, ms] = await timed(async () => { for (let i = 0; i < N; i++) await peer.emit('stream:seq', { i }) })
-  await consume
+  const [, ms] = await timed(async () => {
+    await peer.ask('emitBatch', { key: 'stream:seq', count: N })
+    await consume
+  })
 
   assert.equal(got.length, N)
   assert.deepEqual(got, [...Array(N).keys()], '2000 条顺序完整')
