@@ -1,0 +1,4 @@
+import{_ as e,C as n,o as t,c as r,j as i,a as p,E as l,a3 as d}from"./chunks/framework.BLaSdaBb.js";const g=JSON.parse('{"title":"传输 Provider","description":"","frontmatter":{},"headers":[],"relativePath":"transport/nact/provider.md","filePath":"transport/nact/provider.md","lastUpdated":1791613576000}'),h={name:"transport/nact/provider.md"};function k(c,s,o,E,b,u){const a=n("VitePressMermaid");return t(),r("div",null,[s[0]||(s[0]=i("h1",{id:"传输-provider",tabindex:"-1"},[p("传输 Provider "),i("a",{class:"header-anchor",href:"#传输-provider","aria-label":'Permalink to "传输 Provider"'},"​")],-1)),s[1]||(s[1]=i("p",null,"NACT 本身不包含任何物理传输实现，所有物理连接都由传输 Provider 接入。",-1)),l(a,{value:`flowchart TD
+    S[Server Provider] -->|Channel| T[NACT]
+    C[Client Provider] -->|Channel| T
+    T <--> P[NACP]`}),s[2]||(s[2]=d("",15))])}const v=e(h,[["render",k]]);export{g as __pageData,v as default};
