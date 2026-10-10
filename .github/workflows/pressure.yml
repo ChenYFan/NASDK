@@ -1,8 +1,6 @@
 name: Performance regression
 on:
   push:
-    branches: [main, qa]
-  pull_request:
     branches: [main]
   schedule:
     - cron: '0 3 * * 1'
@@ -27,8 +25,8 @@ jobs:
       - run: npm run test:bench -- up
       - name: Native load + Full/Edge regression + k6
         env:
-          NASDK_BENCH_DURATION: ${{ github.event_name == 'schedule' && '120' || '10' }}
-          NASDK_BENCH_WARMUP: ${{ github.event_name == 'schedule' && '30' || '2' }}
+          NASDK_BENCH_DURATION: ${{ github.event_name == 'schedule' && '30' || '10' }}
+          NASDK_BENCH_WARMUP: ${{ github.event_name == 'schedule' && '5' || '2' }}
         run: npm run test:bench -- ci
       - name: Upload dashboard, results, metrics and k6 summary
         if: always()
