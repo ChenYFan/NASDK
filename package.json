@@ -52,12 +52,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && npm run build --workspaces --if-present",
-    "typecheck": "tsc -p tsconfig.json --noEmit && npm run typecheck --workspaces --if-present",
-    "prepublishOnly": "npm run build",
-    "test": "npm run test:simple",
+    "publish": "node scripts/publish.mjs",
+    "test:type": "tsc -p tsconfig.json --noEmit && npm run typecheck --workspaces --if-present",
     "test:simple": "node --import tsx --test test/simple/*.test.mjs && npm run test:simple --workspaces --if-present",
     "test:full": "node --import tsx --test test/full/*.test.mjs && npm run test:full --workspaces --if-present",
     "test:edge": "node --import tsx --test test/edge/*.test.mjs && npm run test:edge --workspaces --if-present",
+    "test:bench": "node test/bench/cli.mjs",
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs"

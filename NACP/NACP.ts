@@ -139,10 +139,14 @@ export class NACP {
       }
       this.settleDeparture(msgId, true)
       if (!expectsAck(rec.msg.type)) return
+      const evictedApps = new Set<string>()
       for (const ev of this.ackPendingTable.add(rec)) {
         this.napp.bus.emit(NACPInternal.ackWarning, { msg: ev.msg, reason: 'pending-overflow' })
         this.settleAck(ev.msg.id, false)
+        evictedApps.add(ev.destAppId)
       }
+      // Eviction retires the timer's old head; only retained records may time out.
+      for (const appId of evictedApps) this.rearmAckTimer(appId)
       this.armAckTimer(rec.destAppId)
     })
   }

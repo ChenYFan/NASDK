@@ -33,7 +33,7 @@ jobs:
 
       # Fast, clear failures first: types, then a real build, then tests by widening scope.
       - name: Typecheck
-        run: npm run typecheck
+        run: npm run test:type
 
       - name: Build
         run: npm run build

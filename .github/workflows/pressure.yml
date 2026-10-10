@@ -1,0 +1,41 @@
+name: Performance regression
+on:
+  push:
+    branches: [main, qa]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pressure-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  pressure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm run test:type && npm run test:simple
+      - run: npm run test:bench -- up
+      - name: Native load + Full/Edge regression + k6
+        env:
+          NASDK_BENCH_DURATION: ${{ github.event_name == 'schedule' && '120' || '10' }}
+          NASDK_BENCH_WARMUP: ${{ github.event_name == 'schedule' && '30' || '2' }}
+        run: npm run test:bench -- ci
+      - name: Upload dashboard, results, metrics and k6 summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nasdk-performance-${{ github.sha }}
+          path: test/bench/results/
+          retention-days: 30
+      - if: always()
+        run: npm run test:bench -- down
